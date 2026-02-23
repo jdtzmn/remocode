@@ -4,10 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "start": "bun run src/server.ts",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@hono/node-server": "^1.19.4",
     "drizzle-orm": "^0.44.0",
+    "hono": "^4.9.8",
     "postgres": "^3.4.5"
   },
   "devDependencies": {
