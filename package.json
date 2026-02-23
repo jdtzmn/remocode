@@ -12,7 +12,7 @@
     "format:check": "biome format .",
     "lint": "biome lint .",
     "check": "biome check .",
-    "typecheck": "bun run --cwd apps/mobile tsc --noEmit",
+    "typecheck": "bun run --cwd apps/mobile tsc --noEmit && bun run --cwd apps/backend tsc --noEmit && bun run --cwd packages/contracts tsc --noEmit",
     "test": "vitest run --passWithNoTests",
     "ci": "bun run check && bun run typecheck && bun run test"
   },
