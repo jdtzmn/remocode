@@ -1,0 +1,24 @@
+{
+  "name": "remocode",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "bun@1.2.22",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint": "biome lint .",
+    "check": "biome check .",
+    "typecheck": "bun run --cwd apps/mobile tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "ci": "bun run check && bun run typecheck && bun run test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
