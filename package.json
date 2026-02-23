@@ -3,10 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "packageManager": "bun@1.2.22",
-  "workspaces": [
-    "apps/*",
-    "packages/*"
-  ],
+  "workspaces": ["apps/*", "packages/*"],
   "scripts": {
     "format": "biome format --write .",
     "format:check": "biome format .",

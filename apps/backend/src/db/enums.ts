@@ -10,9 +10,19 @@ export const attentionRequestStatusEnum = pgEnum("attention_request_status", [
   "expired",
 ])
 
-export const devicePlatformEnum = pgEnum("device_platform", ["darwin", "linux", "windows", "unknown"])
+export const devicePlatformEnum = pgEnum("device_platform", [
+  "darwin",
+  "linux",
+  "windows",
+  "unknown",
+])
 export const mobilePlatformEnum = pgEnum("mobile_platform", ["ios", "android"])
 
-export const activityConfidenceEnum = pgEnum("activity_confidence", ["high", "medium", "low", "unknown"])
+export const activityConfidenceEnum = pgEnum("activity_confidence", [
+  "high",
+  "medium",
+  "low",
+  "unknown",
+])
 export const notificationDecisionEnum = pgEnum("notification_decision", ["sent", "suppressed"])
 export const actionAttemptStatusEnum = pgEnum("action_attempt_status", ["accepted", "failed"])

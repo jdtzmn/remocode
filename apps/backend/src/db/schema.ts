@@ -50,7 +50,10 @@ export const devices = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => ({
-    userDeviceUidUnique: uniqueIndex("devices_user_device_uid_uq").on(table.userId, table.deviceUid),
+    userDeviceUidUnique: uniqueIndex("devices_user_device_uid_uq").on(
+      table.userId,
+      table.deviceUid,
+    ),
     userIdIndex: index("devices_user_id_idx").on(table.userId),
   }),
 )
@@ -71,7 +74,10 @@ export const personalAccessTokens = pgTable(
   },
   (table) => ({
     tokenPrefixUnique: uniqueIndex("personal_access_tokens_token_prefix_uq").on(table.tokenPrefix),
-    userRevokedIndex: index("personal_access_tokens_user_revoked_idx").on(table.userId, table.revokedAt),
+    userRevokedIndex: index("personal_access_tokens_user_revoked_idx").on(
+      table.userId,
+      table.revokedAt,
+    ),
   }),
 )
 
@@ -97,9 +103,18 @@ export const sessionEvents = pgTable(
   (table) => ({
     eventIdUnique: uniqueIndex("session_events_event_id_uq").on(table.eventId),
     userReceivedIndex: index("session_events_user_received_idx").on(table.userId, table.receivedAt),
-    deviceReceivedIndex: index("session_events_device_received_idx").on(table.deviceId, table.receivedAt),
-    sessionReceivedIndex: index("session_events_session_received_idx").on(table.sessionId, table.receivedAt),
-    eventTypeReceivedIndex: index("session_events_event_type_received_idx").on(table.eventType, table.receivedAt),
+    deviceReceivedIndex: index("session_events_device_received_idx").on(
+      table.deviceId,
+      table.receivedAt,
+    ),
+    sessionReceivedIndex: index("session_events_session_received_idx").on(
+      table.sessionId,
+      table.receivedAt,
+    ),
+    eventTypeReceivedIndex: index("session_events_event_type_received_idx").on(
+      table.eventType,
+      table.receivedAt,
+    ),
   }),
 )
 
@@ -212,8 +227,13 @@ export const mobilePushTokens = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => ({
-    expoPushTokenUnique: uniqueIndex("mobile_push_tokens_expo_push_token_uq").on(table.expoPushToken),
-    userRevokedIndex: index("mobile_push_tokens_user_revoked_idx").on(table.userId, table.revokedAt),
+    expoPushTokenUnique: uniqueIndex("mobile_push_tokens_expo_push_token_uq").on(
+      table.expoPushToken,
+    ),
+    userRevokedIndex: index("mobile_push_tokens_user_revoked_idx").on(
+      table.userId,
+      table.revokedAt,
+    ),
   }),
 )
 
@@ -235,7 +255,10 @@ export const notificationLog = pgTable(
   },
   (table) => ({
     userCreatedIndex: index("notification_log_user_created_idx").on(table.userId, table.createdAt),
-    requestCreatedIndex: index("notification_log_request_created_idx").on(table.requestId, table.createdAt),
+    requestCreatedIndex: index("notification_log_request_created_idx").on(
+      table.requestId,
+      table.createdAt,
+    ),
   }),
 )
 
@@ -258,7 +281,10 @@ export const actionAttempts = pgTable(
       table.userId,
       table.clientActionId,
     ),
-    requestCreatedIndex: index("action_attempts_request_created_idx").on(table.requestId, table.createdAt),
+    requestCreatedIndex: index("action_attempts_request_created_idx").on(
+      table.requestId,
+      table.createdAt,
+    ),
   }),
 )
 
