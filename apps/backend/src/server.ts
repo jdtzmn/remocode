@@ -1,11 +1,12 @@
 import { serve } from "@hono/node-server"
 
 import { createApp } from "./app"
+import { loadEnv } from "./config/env"
 
-const port = Number(process.env.PORT ?? 3001)
+const env = loadEnv()
 const app = createApp()
 
 serve({
   fetch: app.fetch,
-  port,
+  port: env.PORT,
 })
