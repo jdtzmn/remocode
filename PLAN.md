@@ -1251,7 +1251,7 @@ Deliverables:
 
 - monorepo or multi-package structure decided and created
 - shared TypeScript contract package for canonical events and API schemas
-- lint/test baseline
+- lint/format/type/test baseline (Biome + TypeScript + Vitest + CI)
 
 Suggested package layout:
 
@@ -1435,3 +1435,140 @@ Planned future additions (outside this MVP):
 3. Preserve raw payloads in `session_events.payload` for forensic debugging.
 4. Keep unblock finality event-driven (`*.replied/*.rejected`), not relay-ack driven.
 5. Preserve fail-fast offline behavior exactly as specified for MVP.
+
+---
+
+## 26) Code Quality Gates (Linting, Formatting, Type Safety)
+
+## 26.1 Tooling (Locked)
+
+- formatter + linter: Biome
+- type safety: TypeScript (`tsc --noEmit`)
+- tests: Vitest (unit + integration)
+
+## 26.2 Required commands
+
+- `format`: `biome format --write .`
+- `format:check`: `biome format .`
+- `lint`: `biome lint .`
+- `check`: `biome check .`
+- `typecheck`: `tsc -b --noEmit`
+- `test`: `vitest run`
+- `ci`: `npm run check && npm run typecheck && npm run test`
+
+## 26.3 CI policy (merge blocking)
+
+Any pull request must fail if one of these fails:
+
+1. `check`
+2. `typecheck`
+3. `test`
+4. Drizzle migration apply check (only when schema changed)
+
+## 26.4 Quality definition of done addendum
+
+A change is not done unless it is:
+
+- formatted
+- lint-clean
+- type-safe
+- test-passing
+- migration-complete (if schema changed)
+- contract docs updated (if contract shape changed)
+
+---
+
+## 27) OpenCode-Driven Expo Feedback Loop
+
+## 27.1 MCP stack (locked)
+
+- `XcodeBuildMCP` for build/run/log/test workflows
+- `ios-simulator-mcp` for simulator UI interactions and accessibility inspection
+- `swiftlens` for Swift/native code assistance
+
+Note: do not include `context7` in this project setup.
+
+## 27.2 MCP server runtime convention
+
+Use `bunx` for MCP server commands in OpenCode config for this project.
+
+Example:
+
+```json
+{
+  "mcp": {
+    "XcodeBuildMCP": {
+      "type": "local",
+      "command": ["bunx", "xcodebuildmcp@latest", "mcp"],
+      "enabled": true
+    },
+    "ios-simulator": {
+      "type": "local",
+      "command": ["bunx", "ios-simulator-mcp@latest"],
+      "enabled": true
+    },
+    "swiftlens": {
+      "type": "local",
+      "command": ["uvx", "swiftlens"],
+      "enabled": true
+    }
+  }
+}
+```
+
+## 27.3 Tight development loop
+
+1. start backend and Expo dev server
+2. launch app in iOS simulator
+3. run scripted simulator checks (describe screen, tap/type/swipe, screenshot)
+4. validate app state changes for session ordering and blockers
+5. apply code changes
+6. rerun same flow until stable
+
+## 27.4 Required smoke scenarios
+
+- auth success and initial data hydration
+- group-by-device ordering correctness
+- `permission.asked` bumps session/device to top
+- `question.asked` bumps session/device to top
+- permission allow/reject round-trip succeeds
+- question answer/reject round-trip succeeds
+- offline unblock action returns `PLUGIN_OFFLINE`
+- notification suppression works when device is active
+
+---
+
+## 28) Beads Issue Tracking Workflow (Locked)
+
+## 28.1 Install and initialize
+
+- install Beads CLI (`bd`) globally
+- run `bd init` in this repository
+- include guidance in project instructions: use `bd` for issue tracking
+
+## 28.2 Operating rules
+
+- every non-trivial engineering task maps to a Beads issue
+- use explicit state transitions: `open` -> `in_progress` -> `closed`
+- model blockers with dependencies (`bd dep add`)
+- include acceptance criteria on the issue before implementation
+- close issues immediately when completed
+
+## 28.3 Core command set
+
+- `bd ready`
+- `bd create "Title" -p <priority>`
+- `bd update <id> --claim`
+- `bd update <id> --status in_progress`
+- `bd dep add <child> <parent>`
+- `bd close <id> --reason "Completed"`
+
+## 28.4 Commit hygiene
+
+- include Beads issue ID in commit messages (example: `Implement relay timeout handling (bd-abc)`)
+- if code merges while issue remains open, reconcile issue status in the same session
+
+## 28.5 Source-of-truth boundaries
+
+- Beads is the source of truth for active task planning and execution status
+- `PLAN.md` is the source of truth for architecture and implementation contracts
