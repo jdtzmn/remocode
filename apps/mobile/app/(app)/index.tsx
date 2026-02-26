@@ -44,6 +44,8 @@ export default function AttentionScreen() {
   } = useQuery({
     queryKey: ["sessions", "open"],
     queryFn: fetchSessionsOpen,
+    refetchInterval: 60_000,
+    refetchIntervalInBackground: false,
   })
 
   const {
@@ -54,6 +56,8 @@ export default function AttentionScreen() {
   } = useQuery({
     queryKey: ["requests", "open"],
     queryFn: fetchRequestsOpen,
+    refetchInterval: 60_000,
+    refetchIntervalInBackground: false,
   })
 
   const isLoading = sessionsLoading || requestsLoading
