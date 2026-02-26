@@ -1,5 +1,6 @@
 import {
   ApiErrorSchema,
+  RequestRespondAcceptedSchema,
   RequestsOpenResponseSchema,
   SessionsOpenResponseSchema,
 } from "@remocode/contracts"
@@ -12,6 +13,7 @@ import { ApiHttpError } from "./http/errors"
 import { createPluginActivityService } from "./plugin-activity/service"
 import type { PluginEventsIngestService } from "./plugin-events/ingest"
 import { createPluginHeartbeatService } from "./plugin-heartbeat/service"
+import type { RequestRespondService } from "./requests/respond-service"
 import { createRequestsOpenService } from "./requests/service"
 import { createSessionsOpenService } from "./sessions/service"
 
@@ -25,6 +27,7 @@ function createProtectedApp(
     pluginEventsIngest?: PluginEventsIngestService
     sessionsOpen?: ReturnType<typeof createSessionsOpenService>
     requestsOpen?: ReturnType<typeof createRequestsOpenService>
+    requestsRespond?: RequestRespondService
   } = {},
 ) {
   return createApp({
@@ -80,6 +83,13 @@ function createProtectedApp(
         accepted: 0,
         deduped: 0,
         errors: [],
+      })),
+    requestsRespond:
+      options.requestsRespond ??
+      (async () => ({
+        status: "accepted" as const,
+        request_id: "default-request",
+        relay: "sent" as const,
       })),
   })
 }
@@ -506,6 +516,104 @@ describe("createApp", () => {
   it("rejects requests/open without auth", async () => {
     const app = createProtectedApp()
     const response = await app.request("/v1/requests/open")
+
+    expect(response.status).toBe(401)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "UNAUTHORIZED" },
+    })
+  })
+
+  it("responds to a request and returns accepted", async () => {
+    const app = createProtectedApp({
+      requestsRespond: async ({ requestId }) => ({
+        status: "accepted",
+        request_id: requestId,
+        relay: "sent",
+      }),
+    })
+
+    const response = await app.request("/v1/requests/perm-req-1/respond", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${validJwt}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        type: "permission",
+        decision: "once",
+        client_action_id: "11111111-1111-4111-8111-111111111111",
+      }),
+    })
+    const body = await response.json()
+
+    expect(response.status).toBe(200)
+    expect(RequestRespondAcceptedSchema.safeParse(body).success).toBe(true)
+    expect(body.status).toBe("accepted")
+    expect(body.request_id).toBe("perm-req-1")
+    expect(body.relay).toBe("sent")
+  })
+
+  it("returns REQUEST_NOT_FOUND from respond endpoint", async () => {
+    const app = createProtectedApp({
+      requestsRespond: async () => {
+        throw new ApiHttpError("REQUEST_NOT_FOUND")
+      },
+    })
+
+    const response = await app.request("/v1/requests/nonexistent/respond", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${validJwt}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        type: "permission",
+        decision: "once",
+        client_action_id: "11111111-1111-4111-8111-111111111111",
+      }),
+    })
+    const body = await response.json()
+
+    expect(response.status).toBe(404)
+    expect(body).toMatchObject({ error: { code: "REQUEST_NOT_FOUND" } })
+  })
+
+  it("returns PLUGIN_OFFLINE from respond endpoint", async () => {
+    const app = createProtectedApp({
+      requestsRespond: async () => {
+        throw new ApiHttpError("PLUGIN_OFFLINE")
+      },
+    })
+
+    const response = await app.request("/v1/requests/perm-req-1/respond", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${validJwt}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        type: "permission",
+        decision: "once",
+        client_action_id: "11111111-1111-4111-8111-111111111111",
+      }),
+    })
+    const body = await response.json()
+
+    expect(response.status).toBe(409)
+    expect(body).toMatchObject({ error: { code: "PLUGIN_OFFLINE" } })
+  })
+
+  it("rejects requests/respond without auth", async () => {
+    const app = createProtectedApp()
+    const response = await app.request("/v1/requests/perm-req-1/respond", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        type: "permission",
+        decision: "once",
+        client_action_id: "11111111-1111-4111-8111-111111111111",
+      }),
+    })
 
     expect(response.status).toBe(401)
     await expect(response.json()).resolves.toMatchObject({

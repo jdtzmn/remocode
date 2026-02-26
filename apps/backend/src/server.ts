@@ -10,6 +10,7 @@ import { loadEnv, requireAuthEnv } from "./config/env"
 import { runtimePluginActivityService } from "./plugin-activity/runtime"
 import { createRuntimePluginEventsIngestService } from "./plugin-events/runtime"
 import { runtimePluginHeartbeatService } from "./plugin-heartbeat/runtime"
+import { createRuntimeRequestRespondService } from "./requests/respond-runtime"
 import { runtimeRequestsOpenService } from "./requests/runtime"
 import { runtimeSessionsOpenService } from "./sessions/runtime"
 import { attachSocketServer, createSocketServer } from "./socket"
@@ -37,6 +38,7 @@ const app = createApp({
   pluginEventsIngest: createRuntimePluginEventsIngestService(socketEmitter),
   sessionsOpen: runtimeSessionsOpenService,
   requestsOpen: runtimeRequestsOpenService,
+  requestsRespond: createRuntimeRequestRespondService(io),
 })
 
 const httpServer = serve({

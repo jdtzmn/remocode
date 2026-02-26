@@ -1,0 +1,174 @@
+import { type RequestRespondAccepted, RequestRespondRequestSchema } from "@remocode/contracts"
+import type { z } from "zod"
+
+import { type ApiErrorCode, ApiHttpError } from "../http/errors"
+import type { PluginAckEnvelope, PluginCommandEnvelope } from "../socket/types"
+
+export type AttentionRequestRow = {
+  requestId: string
+  userId: string
+  deviceId: string
+  sessionId: string
+  kind: "permission" | "question"
+  status: "open" | "resolved" | "rejected" | "expired"
+}
+
+export type ActionAttemptRow = {
+  status: "accepted" | "failed"
+  result: Record<string, unknown>
+}
+
+export type RequestRespondStore = {
+  getRequest: (args: {
+    requestId: string
+    userId: string
+  }) => Promise<AttentionRequestRow | null>
+
+  getActionAttempt: (args: {
+    userId: string
+    clientActionId: string
+  }) => Promise<ActionAttemptRow | null>
+
+  saveActionAttempt: (args: {
+    userId: string
+    clientActionId: string
+    requestId: string
+    status: "accepted" | "failed"
+    errorCode: string | null
+    result: Record<string, unknown>
+  }) => Promise<void>
+}
+
+export type PluginRelayFn = (args: {
+  deviceId: string
+  envelope: PluginCommandEnvelope
+  eventType: "action.permission.reply" | "action.question.reply" | "action.question.reject"
+}) => Promise<PluginAckEnvelope>
+
+export type RequestRespondService = (args: {
+  userId: string
+  requestId: string
+  payload: unknown
+}) => Promise<RequestRespondAccepted>
+
+export function createRequestRespondService(
+  store: RequestRespondStore,
+  relay: PluginRelayFn,
+): RequestRespondService {
+  return async ({ userId, requestId, payload }) => {
+    // Parse and validate the request body
+    const body = RequestRespondRequestSchema.parse(payload)
+
+    // Look up the attention request (ownership check)
+    const request = await store.getRequest({ requestId, userId })
+
+    if (!request) {
+      throw new ApiHttpError("REQUEST_NOT_FOUND")
+    }
+
+    // Check request is still open
+    if (request.status !== "open") {
+      throw new ApiHttpError("REQUEST_ALREADY_CLOSED")
+    }
+
+    const clientActionId = body.client_action_id
+
+    // Idempotency check: return cached result if we've seen this action before
+    const existingAttempt = await store.getActionAttempt({ userId, clientActionId })
+
+    if (existingAttempt) {
+      if (existingAttempt.status === "accepted") {
+        return existingAttempt.result as RequestRespondAccepted
+      }
+
+      // Previous attempt failed - re-throw the error
+      const errorCode = (existingAttempt.result as { error_code?: string }).error_code
+      throw new ApiHttpError((errorCode as ApiErrorCode | undefined) ?? "INTERNAL_ERROR")
+    }
+
+    // Build the command envelope and relay to plugin
+    const commandId = crypto.randomUUID()
+
+    let eventType: "action.permission.reply" | "action.question.reply" | "action.question.reject"
+    let commandPayload: Record<string, unknown>
+
+    if (body.type === "permission") {
+      eventType = "action.permission.reply"
+      commandPayload = {
+        reply: body.decision,
+        ...(body.message !== undefined ? { message: body.message } : {}),
+      }
+    } else if (body.type === "question" && !("decision" in body)) {
+      eventType = "action.question.reply"
+      commandPayload = { answers: body.answers }
+    } else {
+      // question reject
+      eventType = "action.question.reject"
+      commandPayload = {}
+    }
+
+    const envelope: PluginCommandEnvelope = {
+      command_id: commandId,
+      request_id: requestId,
+      session_id: request.sessionId,
+      payload: commandPayload,
+    }
+
+    let ack: PluginAckEnvelope
+    try {
+      ack = await relay({ deviceId: request.deviceId, envelope, eventType })
+    } catch (err) {
+      // relay threw - could be PLUGIN_OFFLINE or RELAY_TIMEOUT
+      if (err instanceof ApiHttpError) {
+        await store.saveActionAttempt({
+          userId,
+          clientActionId,
+          requestId,
+          status: "failed",
+          errorCode: err.code,
+          result: { error_code: err.code },
+        })
+        throw err
+      }
+      await store.saveActionAttempt({
+        userId,
+        clientActionId,
+        requestId,
+        status: "failed",
+        errorCode: "INTERNAL_ERROR",
+        result: { error_code: "INTERNAL_ERROR" },
+      })
+      throw new ApiHttpError("INTERNAL_ERROR")
+    }
+
+    if (!ack.accepted) {
+      const errorCode = ack.error ?? "RELAY_EXECUTION_FAILED"
+      await store.saveActionAttempt({
+        userId,
+        clientActionId,
+        requestId,
+        status: "failed",
+        errorCode,
+        result: { error_code: errorCode },
+      })
+      throw new ApiHttpError("RELAY_EXECUTION_FAILED")
+    }
+
+    const successResult: RequestRespondAccepted = {
+      status: "accepted",
+      request_id: requestId,
+      relay: "sent",
+    }
+
+    await store.saveActionAttempt({
+      userId,
+      clientActionId,
+      requestId,
+      status: "accepted",
+      errorCode: null,
+      result: successResult as unknown as Record<string, unknown>,
+    })
+
+    return successResult
+  }
+}

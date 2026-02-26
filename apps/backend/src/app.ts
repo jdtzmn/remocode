@@ -6,6 +6,7 @@ import { ApiHttpError, toApiErrorResponse, toApiHttpError } from "./http/errors"
 import type { PluginActivityService } from "./plugin-activity/service"
 import type { PluginEventsIngestService } from "./plugin-events/ingest"
 import type { PluginHeartbeatService } from "./plugin-heartbeat/service"
+import type { RequestRespondService } from "./requests/respond-service"
 import type { RequestsOpenService } from "./requests/service"
 import type { SessionsOpenService } from "./sessions/service"
 
@@ -17,6 +18,7 @@ type CreateAppOptions = {
   pluginEventsIngest?: PluginEventsIngestService
   sessionsOpen?: SessionsOpenService
   requestsOpen?: RequestsOpenService
+  requestsRespond?: RequestRespondService
 }
 
 function rejectWithUnauthorized(message: string): MiddlewareHandler<AuthBindings> {
@@ -68,6 +70,14 @@ export function createApp(options: CreateAppOptions = {}) {
       })
     })
 
+  const requestsRespond =
+    options.requestsRespond ??
+    (async () => {
+      throw new ApiHttpError("INTERNAL_ERROR", {
+        message: "Requests respond service is not configured",
+      })
+    })
+
   app.onError((error, context) => {
     const apiError = toApiHttpError(error)
 
@@ -104,6 +114,21 @@ export function createApp(options: CreateAppOptions = {}) {
   app.get("/v1/requests/open", async (context) => {
     const auth = context.get("appAuth")
     const response = await requestsOpen({ userId: auth.userId })
+    return context.json(response)
+  })
+
+  app.post("/v1/requests/:requestId/respond", async (context) => {
+    let body: unknown
+
+    try {
+      body = await context.req.json()
+    } catch {
+      throw new ApiHttpError("INVALID_PAYLOAD")
+    }
+
+    const auth = context.get("appAuth")
+    const requestId = context.req.param("requestId")
+    const response = await requestsRespond({ userId: auth.userId, requestId, payload: body })
     return context.json(response)
   })
 
