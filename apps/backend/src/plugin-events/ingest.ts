@@ -9,6 +9,7 @@ import { z } from "zod"
 
 import type { AttentionRequestReducer } from "../attention-requests/reducer"
 import { ApiHttpError } from "../http/errors"
+import type { NotificationEngine } from "../notifications/engine"
 import type { SessionProjectionReducer } from "../session-projections/reducer"
 import type { SocketDeltaEmitter } from "../socket/emitter"
 
@@ -51,12 +52,21 @@ const ATTENTION_CLOSE_EVENT_TYPES = new Set([
   "question.rejected",
 ])
 
+// Event types that should trigger a push notification decision
+const BLOCKER_EVENT_TYPES = new Set(["permission.asked", "question.asked"])
+
 type PersistedEventStore = {
   getOrCreateDeviceId: (args: { userId: string; deviceUid: string }) => Promise<string>
   persistEvent: (input: PersistInput) => Promise<PersistResult>
   projectEvent?: SessionProjectionReducer
   projectAttention?: AttentionRequestReducer
   socketEmitter?: SocketDeltaEmitter
+  notificationEngine?: NotificationEngine
+  /** Fetch session title and device name for notification payload construction. */
+  getBlockerContext?: (args: {
+    sessionId: string
+    deviceId: string
+  }) => Promise<{ sessionTitle: string | null; deviceName: string | null }>
 }
 
 export type PluginEventsIngestService = (args: {
@@ -181,6 +191,49 @@ export function createPluginEventsIngestService(
                   await store.socketEmitter.emitRequestResolved(userId, requestId)
                 }
               }
+            }
+          }
+
+          // Push notification decision for new open blockers
+          if (
+            store.notificationEngine &&
+            BLOCKER_EVENT_TYPES.has(event.event_type) &&
+            event.session_id
+          ) {
+            const requestId = (event.payload as { id?: string }).id
+            const kind = event.event_type === "permission.asked" ? "permission" : "question"
+
+            if (requestId) {
+              let sessionTitle: string | null = null
+              let deviceName: string | null = null
+
+              if (store.getBlockerContext) {
+                try {
+                  const ctx = await store.getBlockerContext({
+                    sessionId: event.session_id,
+                    deviceId,
+                  })
+                  sessionTitle = ctx.sessionTitle
+                  deviceName = ctx.deviceName
+                } catch {
+                  // Non-fatal — proceed with null context
+                }
+              }
+
+              // Fire-and-forget: notification errors must not fail ingest
+              store.notificationEngine
+                .handleBlocker({
+                  requestId,
+                  sessionId: event.session_id,
+                  deviceId,
+                  userId,
+                  kind,
+                  sessionTitle,
+                  deviceName,
+                })
+                .catch(() => {
+                  // swallow — notification errors must not fail event ingest
+                })
             }
           }
         }

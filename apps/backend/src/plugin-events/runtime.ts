@@ -2,6 +2,7 @@ import { runtimeAttentionRequestReducer } from "../attention-requests/runtime"
 import { db } from "../db"
 import { sessionEvents } from "../db/schema"
 import { getOrCreateDeviceIdForUser } from "../devices/repository"
+import { getBlockerContext, runtimeNotificationEngine } from "../notifications/runtime"
 import { runtimeSessionProjectionReducer } from "../session-projections/runtime"
 import type { SocketDeltaEmitter } from "../socket/emitter"
 import { createPluginEventsIngestService } from "./ingest"
@@ -31,6 +32,8 @@ export function createRuntimePluginEventsIngestService(socketEmitter?: SocketDel
     projectEvent: runtimeSessionProjectionReducer,
     projectAttention: runtimeAttentionRequestReducer,
     socketEmitter,
+    notificationEngine: runtimeNotificationEngine,
+    getBlockerContext,
   })
 }
 
