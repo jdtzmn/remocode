@@ -1,13 +1,12 @@
 import { Hono } from "hono"
 import type { MiddlewareHandler } from "hono"
 
-import { SessionsOpenResponseSchema } from "@remocode/contracts"
-
 import type { AuthBindings } from "./auth/types"
 import { ApiHttpError, toApiErrorResponse, toApiHttpError } from "./http/errors"
 import type { PluginActivityService } from "./plugin-activity/service"
 import type { PluginEventsIngestService } from "./plugin-events/ingest"
 import type { PluginHeartbeatService } from "./plugin-heartbeat/service"
+import type { SessionsOpenService } from "./sessions/service"
 
 type CreateAppOptions = {
   appAuthMiddleware?: MiddlewareHandler<AuthBindings>
@@ -15,6 +14,7 @@ type CreateAppOptions = {
   pluginHeartbeat?: PluginHeartbeatService
   pluginActivity?: PluginActivityService
   pluginEventsIngest?: PluginEventsIngestService
+  sessionsOpen?: SessionsOpenService
 }
 
 function rejectWithUnauthorized(message: string): MiddlewareHandler<AuthBindings> {
@@ -50,6 +50,14 @@ export function createApp(options: CreateAppOptions = {}) {
       })
     })
 
+  const sessionsOpen =
+    options.sessionsOpen ??
+    (async () => {
+      throw new ApiHttpError("INTERNAL_ERROR", {
+        message: "Sessions open service is not configured",
+      })
+    })
+
   app.onError((error, context) => {
     const apiError = toApiHttpError(error)
 
@@ -72,9 +80,10 @@ export function createApp(options: CreateAppOptions = {}) {
     options.appAuthMiddleware ?? rejectWithUnauthorized("App authentication is not configured"),
   )
 
-  app.get("/v1/sessions/open", (context) => {
-    context.get("appAuth")
-    return context.json(SessionsOpenResponseSchema.parse({ groups: [] }))
+  app.get("/v1/sessions/open", async (context) => {
+    const auth = context.get("appAuth")
+    const response = await sessionsOpen({ userId: auth.userId })
+    return context.json(response)
   })
 
   app.use(

@@ -1,4 +1,4 @@
-import { ApiErrorSchema } from "@remocode/contracts"
+import { ApiErrorSchema, SessionsOpenResponseSchema } from "@remocode/contracts"
 import { describe, expect, it } from "vitest"
 import { z } from "zod"
 
@@ -8,6 +8,7 @@ import { ApiHttpError } from "./http/errors"
 import { createPluginActivityService } from "./plugin-activity/service"
 import type { PluginEventsIngestService } from "./plugin-events/ingest"
 import { createPluginHeartbeatService } from "./plugin-heartbeat/service"
+import { createSessionsOpenService } from "./sessions/service"
 
 const validJwt = "jwt-valid"
 const validPat = "pat_validPrefix_validSecret"
@@ -17,6 +18,7 @@ function createProtectedApp(
     pluginHeartbeat?: ReturnType<typeof createPluginHeartbeatService>
     pluginActivity?: ReturnType<typeof createPluginActivityService>
     pluginEventsIngest?: PluginEventsIngestService
+    sessionsOpen?: ReturnType<typeof createSessionsOpenService>
   } = {},
 ) {
   return createApp({
@@ -46,6 +48,11 @@ function createProtectedApp(
         }
       },
     }),
+    sessionsOpen:
+      options.sessionsOpen ??
+      createSessionsOpenService({
+        getOpenSessions: async () => [],
+      }),
     pluginHeartbeat:
       options.pluginHeartbeat ??
       createPluginHeartbeatService({
@@ -371,6 +378,56 @@ describe("createApp", () => {
           message: "Invalid payload",
         },
       ],
+    })
+  })
+
+  it("returns sessions/open with populated groups", async () => {
+    const app = createProtectedApp({
+      sessionsOpen: createSessionsOpenService({
+        getOpenSessions: async () => [
+          {
+            sessionId: "session-abc",
+            title: "Refactor auth",
+            sessionState: "busy",
+            requiresAttention: true,
+            attentionCount: 1,
+            lastEventAt: new Date("2026-02-22T10:00:00.000Z"),
+            lastAttentionAt: new Date("2026-02-22T09:55:00.000Z"),
+            isStale: false,
+            deviceId: "device-1",
+            deviceName: "MacBook Pro",
+            devicePlatform: "darwin",
+            deviceLastSeenAt: new Date("2026-02-22T10:00:00.000Z"),
+            activityIsActive: true,
+            activityIdleSeconds: 30,
+            activitySampledAt: new Date("2026-02-22T09:59:00.000Z"),
+          },
+        ],
+      }),
+    })
+
+    const response = await app.request("/v1/sessions/open", {
+      headers: { authorization: `Bearer ${validJwt}` },
+    })
+    const body = await response.json()
+
+    expect(response.status).toBe(200)
+    expect(SessionsOpenResponseSchema.safeParse(body).success).toBe(true)
+    expect(body.groups).toHaveLength(1)
+    expect(body.groups[0].device.name).toBe("MacBook Pro")
+    expect(body.groups[0].sessions).toHaveLength(1)
+    expect(body.groups[0].sessions[0].session_id).toBe("session-abc")
+    expect(body.groups[0].sessions[0].requires_attention).toBe(true)
+    expect(body.groups[0].device.activity).not.toBeNull()
+  })
+
+  it("rejects sessions/open without auth", async () => {
+    const app = createProtectedApp()
+    const response = await app.request("/v1/sessions/open")
+
+    expect(response.status).toBe(401)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "UNAUTHORIZED" },
     })
   })
 })
