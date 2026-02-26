@@ -163,6 +163,26 @@ export type EventBatchSenderOptions = {
   maxBatchSize?: number
   /** Max time in milliseconds before flushing pending events. Defaults to 250ms. */
   flushIntervalMs?: number
+  /**
+   * Max number of events to hold in the pending queue before dropping.
+   * Blocker events (permission.asked, question.asked) are NEVER dropped.
+   * Oldest non-critical events are dropped first.
+   * Defaults to 500.
+   */
+  maxQueueSize?: number
+  /**
+   * Max retry attempts for a failed batch send (uses exponential backoff with jitter).
+   * Set to 0 to disable retries. Defaults to 3.
+   */
+  maxRetries?: number
+  /**
+   * Base delay in milliseconds for retry backoff. Defaults to 1000ms.
+   */
+  retryBaseDelayMs?: number
+  /**
+   * Maximum delay in milliseconds for retry backoff. Defaults to 30000ms.
+   */
+  retryMaxDelayMs?: number
 }
 
 /**
@@ -175,47 +195,151 @@ export type EventBatchSenderHandle = {
   flush: () => Promise<void>
   /** Stop the background flush timer and flush remaining events. */
   stop: () => Promise<void>
+  /** Returns the current number of pending events in the queue. */
+  getPendingCount: () => number
 }
 
 /**
- * Sends a batch of events to the backend.
+ * Computes the retry delay with exponential backoff and full jitter.
+ * Formula: random(0, min(maxDelay, baseDelay * 2^attempt))
+ *
+ * @internal exported for testing
  */
-async function sendEventBatch(
+export function computeRetryDelay(
+  attempt: number,
+  baseDelayMs: number,
+  maxDelayMs: number,
+): number {
+  const cap = Math.min(maxDelayMs, baseDelayMs * 2 ** attempt)
+  // Full jitter: uniform random in [0, cap]
+  return Math.random() * cap
+}
+
+/**
+ * Sends a batch of events to the backend with exponential backoff + jitter retry.
+ * Throws only after all retries are exhausted.
+ *
+ * @internal exported for testing
+ */
+export async function sendEventBatchWithRetry(
   backendUrl: string,
   pat: string,
   events: CanonicalEventEnvelope[],
+  maxRetries: number,
+  retryBaseDelayMs: number,
+  retryMaxDelayMs: number,
 ): Promise<void> {
   if (events.length === 0) return
 
-  const response = await fetch(`${backendUrl}/v1/plugin/events`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${pat}`,
-    },
-    body: JSON.stringify({ events }),
-  })
+  let lastError: Error | undefined
 
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => "unknown error")
-    throw new Error(`Failed to send event batch: ${response.status} ${errorText}`)
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (attempt > 0) {
+      const delay = computeRetryDelay(attempt - 1, retryBaseDelayMs, retryMaxDelayMs)
+      await new Promise<void>((resolve) => setTimeout(resolve, delay))
+    }
+
+    try {
+      const response = await fetch(`${backendUrl}/v1/plugin/events`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${pat}`,
+        },
+        body: JSON.stringify({ events }),
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => "unknown error")
+        throw new Error(`Failed to send event batch: ${response.status} ${errorText}`)
+      }
+
+      // Success — exit retry loop
+      return
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err))
+      if (attempt < maxRetries) {
+        console.warn(
+          `[remocode] Event batch send attempt ${attempt + 1}/${maxRetries + 1} failed, retrying:`,
+          lastError.message,
+        )
+      }
+    }
   }
+
+  throw lastError
 }
 
 /**
  * Creates an event batch sender that:
- * - Buffers events and flushes every 250ms or when 50 events accumulate
+ * - Buffers events in a bounded queue (maxQueueSize, default 500)
+ * - Flushes every 250ms or when 50 events accumulate
  * - Immediately flushes blocker events (permission.asked, question.asked)
+ * - Retries failed sends with exponential backoff + jitter (up to maxRetries=3)
+ * - On queue overflow, drops oldest non-critical events first; NEVER drops blocker events
  * - Logs errors but does not throw (non-fatal)
  *
  * Per spec §13.4: immediate flush for blocker events, batch otherwise.
+ * Per spec §13.6: exponential reconnect (handled by socket), HTTP retry with jitter,
+ *   bounded memory queue, never drop blocker events before reporting overflow.
  */
 export function createEventBatchSender(options: EventBatchSenderOptions): EventBatchSenderHandle {
-  const { pat, maxBatchSize = 50, flushIntervalMs = 250 } = options
+  const {
+    pat,
+    maxBatchSize = 50,
+    flushIntervalMs = 250,
+    maxQueueSize = 500,
+    maxRetries = 3,
+    retryBaseDelayMs = 1000,
+    retryMaxDelayMs = 30000,
+  } = options
   const backendUrl = options.backendUrl.replace(/\/$/, "")
 
   const pendingEvents: CanonicalEventEnvelope[] = []
   let currentFlushChain: Promise<void> = Promise.resolve()
+
+  /**
+   * Enforce the queue size cap by dropping oldest non-critical events.
+   * Blocker events are NEVER dropped; they are preserved by moving them
+   * to the front if necessary.
+   */
+  const enforceQueueCap = (): void => {
+    if (pendingEvents.length <= maxQueueSize) return
+
+    const overflow = pendingEvents.length - maxQueueSize
+
+    // Find indices of non-blocker events (oldest first = lowest index first)
+    const nonBlockerIndices: number[] = []
+    for (let i = 0; i < pendingEvents.length; i++) {
+      const evt = pendingEvents[i]
+      if (evt && !isBlockerCanonicalEventType(evt.event_type)) {
+        nonBlockerIndices.push(i)
+      }
+    }
+
+    const toDrop = Math.min(overflow, nonBlockerIndices.length)
+
+    if (toDrop > 0) {
+      // Remove the oldest non-blocker events (lowest indices).
+      // We sort indices in descending order so that splicing higher indices
+      // first does not affect the position of lower indices.
+      const indicesToRemove = nonBlockerIndices.slice(0, toDrop).sort((a, b) => b - a)
+      for (const idx of indicesToRemove) {
+        pendingEvents.splice(idx, 1)
+      }
+
+      console.warn(
+        `[remocode] Queue overflow: dropped ${toDrop} non-critical event(s) to stay within maxQueueSize=${maxQueueSize}. ` +
+          `Current queue: ${pendingEvents.length} events.`,
+      )
+    } else if (overflow > 0) {
+      // All remaining events are blockers — cannot drop any
+      console.warn(
+        `[remocode] Queue overflow: ${overflow} excess event(s) cannot be dropped (all are blocker events). ` +
+          `Queue size: ${pendingEvents.length}.`,
+      )
+    }
+  }
 
   const doFlush = async (): Promise<void> => {
     if (pendingEvents.length === 0) return
@@ -223,10 +347,17 @@ export function createEventBatchSender(options: EventBatchSenderOptions): EventB
     const batch = pendingEvents.splice(0, pendingEvents.length)
 
     try {
-      await sendEventBatch(backendUrl, pat, batch)
+      await sendEventBatchWithRetry(
+        backendUrl,
+        pat,
+        batch,
+        maxRetries,
+        retryBaseDelayMs,
+        retryMaxDelayMs,
+      )
     } catch (err) {
-      console.error("[remocode] Failed to send event batch:", err)
-      // Events are dropped on failure; per spec, no offline queue for non-critical events
+      console.error("[remocode] Failed to send event batch after retries:", err)
+      // Events are dropped after all retries exhausted; spec: fail-fast, no offline queue
     }
   }
 
@@ -251,6 +382,9 @@ export function createEventBatchSender(options: EventBatchSenderOptions): EventB
   const enqueue = (envelope: CanonicalEventEnvelope): void => {
     pendingEvents.push(envelope)
 
+    // Enforce the bounded queue cap — drop oldest non-critical events if needed
+    enforceQueueCap()
+
     const isBlocker = isBlockerCanonicalEventType(envelope.event_type)
     const isBatchFull = pendingEvents.length >= maxBatchSize
 
@@ -266,7 +400,9 @@ export function createEventBatchSender(options: EventBatchSenderOptions): EventB
     await flush()
   }
 
-  return { enqueue, flush, stop }
+  const getPendingCount = (): number => pendingEvents.length
+
+  return { enqueue, flush, stop, getPendingCount }
 }
 
 /**
