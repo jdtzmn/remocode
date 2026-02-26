@@ -1,7 +1,11 @@
 import { serve } from "@hono/node-server"
 
 import { createApp } from "./app"
-import { createRuntimeAuthMiddlewares, createRuntimeSupabaseJwtVerifier } from "./auth/runtime"
+import {
+  createRuntimeAuthMiddlewares,
+  createRuntimePatAuthenticator,
+  createRuntimeSupabaseJwtVerifier,
+} from "./auth/runtime"
 import { loadEnv, requireAuthEnv } from "./config/env"
 import { runtimePluginActivityService } from "./plugin-activity/runtime"
 import { runtimePluginEventsIngestService } from "./plugin-events/runtime"
@@ -24,6 +28,7 @@ const app = createApp({
 
 const io = createSocketServer({
   verifyToken: createRuntimeSupabaseJwtVerifier(authEnv),
+  authenticate: createRuntimePatAuthenticator(authEnv),
   corsOrigin: env.SOCKET_IO_CORS_ORIGIN,
 })
 

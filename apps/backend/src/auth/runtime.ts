@@ -54,12 +54,8 @@ export function createRuntimeSupabaseJwtVerifier(authEnv: {
   })
 }
 
-export function createRuntimeAuthMiddlewares(env: AppEnv) {
-  const authEnv = requireAuthEnv(env)
-
-  const verifyToken = createRuntimeSupabaseJwtVerifier(authEnv)
-
-  const authenticate = createPatAuthenticator({
+export function createRuntimePatAuthenticator(authEnv: { PAT_HASH_PEPPER: string }) {
+  return createPatAuthenticator({
     pepper: authEnv.PAT_HASH_PEPPER,
     findPatByPrefix: async (tokenPrefix) => {
       const rows = await db
@@ -83,6 +79,13 @@ export function createRuntimeAuthMiddlewares(env: AppEnv) {
         .where(eq(personalAccessTokens.id, patId))
     },
   })
+}
+
+export function createRuntimeAuthMiddlewares(env: AppEnv) {
+  const authEnv = requireAuthEnv(env)
+
+  const verifyToken = createRuntimeSupabaseJwtVerifier(authEnv)
+  const authenticate = createRuntimePatAuthenticator(authEnv)
 
   return {
     appAuthMiddleware: createAppAuthMiddleware({ verifyToken }),

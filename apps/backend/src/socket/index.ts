@@ -2,14 +2,26 @@ import type { ServerType } from "@hono/node-server"
 import type { ServerOptions } from "socket.io"
 import { Server } from "socket.io"
 
+import type { PatAuthenticator } from "../auth/pat"
 import type { SupabaseJwtVerifier } from "../auth/supabase"
+import { getOrCreateDeviceIdForUser } from "../devices/repository"
 import { configureAppNamespace } from "./app-namespace"
+import { configurePluginNamespace } from "./plugin-namespace"
 
 export type { AppNamespaceServer } from "./app-namespace"
-export type { AppClientToServerEvents, AppServerToClientEvents, AppSocketData } from "./types"
+export type { PluginNamespaceServer } from "./plugin-namespace"
+export type {
+  AppClientToServerEvents,
+  AppServerToClientEvents,
+  AppSocketData,
+  PluginClientToServerEvents,
+  PluginServerToClientEvents,
+  PluginSocketData,
+} from "./types"
 
 export type CreateSocketServerOptions = {
   verifyToken: SupabaseJwtVerifier
+  authenticate: PatAuthenticator
   corsOrigin?: string | string[]
   socketOptions?: Partial<ServerOptions>
 }
@@ -30,6 +42,10 @@ export function createSocketServer(options: CreateSocketServerOptions): Server {
   })
 
   configureAppNamespace(io, { verifyToken: options.verifyToken })
+  configurePluginNamespace(io, {
+    authenticate: options.authenticate,
+    getOrCreateDeviceId: getOrCreateDeviceIdForUser,
+  })
 
   return io
 }
