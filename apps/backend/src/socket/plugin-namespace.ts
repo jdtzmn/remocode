@@ -1,6 +1,7 @@
 import type { Server } from "socket.io"
 
 import type { PatAuthenticator } from "../auth/pat"
+import { logger } from "../logger"
 import type {
   PluginClientToServerEvents,
   PluginInterServerEvents,
@@ -35,16 +36,20 @@ export function configurePluginNamespace(
 ): void {
   const pluginNs = io.of("/plugin")
 
+  const pluginNsLog = logger.child({ namespace: "/plugin" })
+
   pluginNs.use(async (socket, next) => {
     const token: unknown = socket.handshake.auth?.token
     const deviceUid: unknown = socket.handshake.auth?.device_uid
 
     if (typeof token !== "string" || token.length === 0) {
+      pluginNsLog.warn("plugin socket auth rejected: missing token", { socket_id: socket.id })
       next(new Error("UNAUTHORIZED"))
       return
     }
 
     if (typeof deviceUid !== "string" || deviceUid.length === 0) {
+      pluginNsLog.warn("plugin socket auth rejected: missing device_uid", { socket_id: socket.id })
       next(new Error("INVALID_PAYLOAD"))
       return
     }
@@ -60,12 +65,30 @@ export function configurePluginNamespace(
       socket.data.deviceId = deviceId
       next()
     } catch {
+      pluginNsLog.warn("plugin socket auth rejected: authentication failed", {
+        socket_id: socket.id,
+      })
       next(new Error("UNAUTHORIZED"))
     }
   })
 
   pluginNs.on("connection", (socket) => {
     const deviceId = socket.data.deviceId
+    const userId = socket.data.userId
     void socket.join(`device:${deviceId}`)
+    pluginNsLog.info("plugin socket connected", {
+      user_id: userId,
+      device_id: deviceId,
+      socket_id: socket.id,
+    })
+
+    socket.on("disconnect", (reason) => {
+      pluginNsLog.info("plugin socket disconnected", {
+        user_id: userId,
+        device_id: deviceId,
+        socket_id: socket.id,
+        reason,
+      })
+    })
   })
 }

@@ -9,6 +9,7 @@ import { z } from "zod"
 
 import type { AttentionRequestReducer } from "../attention-requests/reducer"
 import { ApiHttpError } from "../http/errors"
+import { logger } from "../logger"
 import type { NotificationEngine } from "../notifications/engine"
 import type { SessionProjectionReducer } from "../session-projections/reducer"
 import type { SocketDeltaEmitter } from "../socket/emitter"
@@ -89,6 +90,7 @@ export function createPluginEventsIngestService(
   store: PersistedEventStore,
 ): PluginEventsIngestService {
   return async ({ userId, payload }) => {
+    const ingestLog = logger.child({ user_id: userId })
     const body = PluginEventsEnvelopeSchema.parse(payload)
 
     let accepted = 0
@@ -103,6 +105,7 @@ export function createPluginEventsIngestService(
         const eventId = getEventIdFromUnknown(rawEvent)
 
         if (!eventId) {
+          ingestLog.warn("event ingest failed: invalid payload without event_id")
           throw new ApiHttpError("INVALID_PAYLOAD", {
             details: {
               issues: eventParse.error.issues.map((issue) => ({
@@ -113,6 +116,7 @@ export function createPluginEventsIngestService(
           })
         }
 
+        ingestLog.warn("event ingest error: invalid event payload", { event_id: eventId })
         errors.push({
           event_id: eventId,
           code: "INVALID_PAYLOAD",
@@ -122,6 +126,12 @@ export function createPluginEventsIngestService(
       }
 
       const event = eventParse.data
+      const eventLog = ingestLog.child({
+        event_id: event.event_id,
+        session_id: event.session_id ?? undefined,
+        event_type: event.event_type,
+      })
+
       let deviceId = deviceIdByUid.get(event.device_uid)
 
       if (!deviceId) {
@@ -132,6 +142,8 @@ export function createPluginEventsIngestService(
         deviceIdByUid.set(event.device_uid, deviceId)
       }
 
+      const eventWithDeviceLog = eventLog.child({ device_id: deviceId })
+
       try {
         const persistResult = await store.persistEvent({
           userId,
@@ -141,8 +153,10 @@ export function createPluginEventsIngestService(
 
         if (persistResult === "deduped") {
           deduped += 1
+          eventWithDeviceLog.debug("event deduped")
         } else {
           accepted += 1
+          eventWithDeviceLog.info("event accepted")
           const receivedAt = new Date()
 
           let sessionProjectionUpdated = false
@@ -189,6 +203,7 @@ export function createPluginEventsIngestService(
                 const requestId = (event.payload as { requestID?: string }).requestID
                 if (requestId) {
                   await store.socketEmitter.emitRequestResolved(userId, requestId)
+                  eventWithDeviceLog.info("request resolved via event", { request_id: requestId })
                 }
               }
             }
@@ -204,6 +219,11 @@ export function createPluginEventsIngestService(
             const kind = event.event_type === "permission.asked" ? "permission" : "question"
 
             if (requestId) {
+              eventWithDeviceLog.info("blocker event: triggering notification evaluation", {
+                request_id: requestId,
+                kind,
+              })
+
               let sessionTitle: string | null = null
               let deviceName: string | null = null
 
@@ -238,6 +258,7 @@ export function createPluginEventsIngestService(
           }
         }
       } catch {
+        eventWithDeviceLog.error("event ingest error: unable to persist event")
         errors.push({
           event_id: event.event_id,
           code: "INTERNAL_ERROR",
@@ -245,6 +266,8 @@ export function createPluginEventsIngestService(
         })
       }
     }
+
+    ingestLog.info("event batch processed", { accepted, deduped, errors: errors.length })
 
     return PluginEventsIngestResponseSchema.parse({
       accepted,

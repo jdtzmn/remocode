@@ -8,6 +8,7 @@
  * - Dispatching push notifications via the push sender when decision is "send"
  */
 
+import { logger } from "../logger"
 import type { PushSender } from "./push-sender"
 import type { ActivitySample, SuppressionDecision } from "./suppression"
 import { decideSuppression } from "./suppression"
@@ -58,15 +59,25 @@ export type NotificationEngine = {
 export function createNotificationEngine(store: NotificationEngineStore): NotificationEngine {
   return {
     handleBlocker: async (trigger) => {
+      const notifLog = logger.child({
+        user_id: trigger.userId,
+        device_id: trigger.deviceId,
+        request_id: trigger.requestId,
+        session_id: trigger.sessionId,
+        kind: trigger.kind,
+      })
+
       // Dedup check: exactly one notification per unique open request_id.
       // If we've already logged a notification for this request, skip silently.
       try {
         const alreadyNotified = await store.hasNotificationForRequest(trigger.requestId)
         if (alreadyNotified) {
+          notifLog.debug("notification skipped: already notified for this request")
           return { decision: "suppress", reason: "already_notified" }
         }
       } catch {
         // Fail-open: if we can't check dedup, proceed with normal evaluation.
+        notifLog.warn("notification dedup check failed, proceeding with evaluation")
       }
 
       let decision: SuppressionDecision
@@ -76,8 +87,14 @@ export function createNotificationEngine(store: NotificationEngineStore): Notifi
         decision = decideSuppression(sample)
       } catch {
         // Fail-open: if we can't read activity, default to send.
+        notifLog.warn("activity fetch failed, defaulting to send")
         decision = { decision: "send", reason: "activity_fetch_error" }
       }
+
+      notifLog.info("notification decision", {
+        notification_decision: decision.decision,
+        reason: decision.reason,
+      })
 
       const notificationPayload = buildNotificationPayload(trigger)
 
@@ -92,6 +109,7 @@ export function createNotificationEngine(store: NotificationEngineStore): Notifi
         })
       } catch {
         // Log failure is non-fatal — decision still stands.
+        notifLog.warn("failed to write notification log entry")
       }
 
       // Send push notification when decision is "send"
@@ -102,8 +120,10 @@ export function createNotificationEngine(store: NotificationEngineStore): Notifi
             body: notificationPayload.body as string,
             data: (notificationPayload.data ?? {}) as Record<string, unknown>,
           })
+          notifLog.info("push notification sent")
         } catch {
           // Push send failure is non-fatal — logged decision still stands.
+          notifLog.warn("push notification send failed")
         }
       }
 

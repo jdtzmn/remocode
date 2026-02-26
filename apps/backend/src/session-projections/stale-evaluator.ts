@@ -10,6 +10,8 @@
  * threshold.
  */
 
+import { logger } from "../logger"
+
 export const STALE_THRESHOLD_MS = 60 * 1000 // 60 seconds
 
 export type StaleEvaluatorStore = {
@@ -30,16 +32,25 @@ export type StaleEvaluatorJob = {
 export const STALE_EVALUATOR_INTERVAL_MS = 30 * 1000 // run every 30s (half the stale threshold)
 
 export function createStaleEvaluatorJob(store: StaleEvaluatorStore): StaleEvaluatorJob {
+  const staleLog = logger.child({ job: "stale-evaluator" })
+
   const run = async (): Promise<{ markedStale: number }> => {
     const staleBeforeDate = new Date(Date.now() - STALE_THRESHOLD_MS)
     const markedStale = await store.markStaleSessions(staleBeforeDate)
+
+    if (markedStale > 0) {
+      staleLog.info("stale sessions marked", { marked_stale: markedStale })
+    }
+
     return { markedStale }
   }
 
   const start = (intervalMs = STALE_EVALUATOR_INTERVAL_MS): (() => void) => {
     const timer = setInterval(() => {
       run().catch((err) => {
-        console.error("[stale-evaluator] error during evaluation", err)
+        staleLog.error("error during stale evaluation", {
+          error: err instanceof Error ? err.message : String(err),
+        })
       })
     }, intervalMs)
 
