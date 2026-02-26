@@ -572,11 +572,80 @@ export const ApiErrorSchema = z
   })
   .strict()
 
+// Primitive types
+export type IsoDateTime = z.infer<typeof IsoDateTimeSchema>
+export type Uuid = z.infer<typeof UuidSchema>
+
+// Event types
+export type EventType = z.infer<typeof EventTypeSchema>
 export type CanonicalEvent = z.infer<typeof CanonicalEventSchema>
+
+// Session types
+export type SessionInfo = z.infer<typeof SessionInfoSchema>
+export type SessionStatus = z.infer<typeof SessionStatusSchema>
+export type SessionState = z.infer<typeof SessionStateSchema>
+export type SessionSummary = z.infer<typeof SessionSummarySchema>
+export type SessionsOpenResponse = z.infer<typeof SessionsOpenResponseSchema>
+export type DeviceGroup = z.infer<typeof DeviceGroupSchema>
+export type DeviceActivitySummary = z.infer<typeof DeviceActivitySummarySchema>
+
+// Attention request types
+export type AttentionRequestKind = z.infer<typeof AttentionRequestKindSchema>
+export type AttentionRequestStatus = z.infer<typeof AttentionRequestStatusSchema>
+export type OpenAttentionRequest = z.infer<typeof OpenAttentionRequestSchema>
+export type RequestsOpenResponse = z.infer<typeof RequestsOpenResponseSchema>
+
+// Permission types
+export type PermissionReply = z.infer<typeof PermissionReplySchema>
+export type PermissionRequestPayload = z.infer<typeof PermissionRequestPayloadSchema>
+export type PermissionRepliedPayload = z.infer<typeof PermissionRepliedPayloadSchema>
+
+// Question types
+export type QuestionOption = z.infer<typeof QuestionOptionSchema>
+export type QuestionInfo = z.infer<typeof QuestionInfoSchema>
+export type QuestionRequestPayload = z.infer<typeof QuestionRequestPayloadSchema>
+export type QuestionRepliedPayload = z.infer<typeof QuestionRepliedPayloadSchema>
+export type QuestionRejectedPayload = z.infer<typeof QuestionRejectedPayloadSchema>
+
+// Plugin payload types
+export type PluginConnectedPayload = z.infer<typeof PluginConnectedPayloadSchema>
+export type PluginHeartbeatPayload = z.infer<typeof PluginHeartbeatPayloadSchema>
+export type ActivityConfidence = z.infer<typeof ActivityConfidenceSchema>
+export type DeviceActivityPayload = z.infer<typeof DeviceActivityPayloadSchema>
+export type SessionLifecyclePayload = z.infer<typeof SessionLifecyclePayloadSchema>
+export type SessionStatusPayload = z.infer<typeof SessionStatusPayloadSchema>
+
+// Plugin endpoint request/response types
 export type PluginEventsIngestRequest = z.infer<typeof PluginEventsIngestRequestSchema>
 export type PluginEventsIngestResponse = z.infer<typeof PluginEventsIngestResponseSchema>
+export type PluginHeartbeatRequest = z.infer<typeof PluginHeartbeatRequestSchema>
+export type PluginActivityRequest = z.infer<typeof PluginActivityRequestSchema>
+
+// App action request/response types
+export type PermissionRespondRequest = z.infer<typeof PermissionRespondRequestSchema>
+export type QuestionRespondAnswersRequest = z.infer<typeof QuestionRespondAnswersRequestSchema>
+export type QuestionRespondRejectRequest = z.infer<typeof QuestionRespondRejectRequestSchema>
 export type RequestRespondRequest = z.infer<typeof RequestRespondRequestSchema>
 export type RequestRespondAccepted = z.infer<typeof RequestRespondAcceptedSchema>
+
+// Push token types
+export type PushTokenPlatform = z.infer<typeof PushTokenPlatformSchema>
+export type PushTokenRegisterRequest = z.infer<typeof PushTokenRegisterRequestSchema>
+
+// PAT types
+export type PatCreateRequest = z.infer<typeof PatCreateRequestSchema>
+export type PatCreateResponse = z.infer<typeof PatCreateResponseSchema>
+export type PatListItem = z.infer<typeof PatListItemSchema>
+export type PatListResponse = z.infer<typeof PatListResponseSchema>
+
+// Plugin command types
+export type PluginCommandType = z.infer<typeof PluginCommandTypeSchema>
+export type PluginPermissionReplyCommand = z.infer<typeof PluginPermissionReplyCommandSchema>
+export type PluginQuestionReplyCommand = z.infer<typeof PluginQuestionReplyCommandSchema>
+export type PluginQuestionRejectCommand = z.infer<typeof PluginQuestionRejectCommandSchema>
 export type PluginCommand = z.infer<typeof PluginCommandSchema>
 export type PluginCommandAck = z.infer<typeof PluginCommandAckSchema>
+
+// Error types
+export type ApiErrorCode = z.infer<typeof ApiErrorCodeSchema>
 export type ApiError = z.infer<typeof ApiErrorSchema>
