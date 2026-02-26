@@ -1,5 +1,6 @@
 import type { Plugin } from "@opencode-ai/plugin"
 
+import { startActivitySampler } from "./activity-sampler"
 import { type OpenCodeClient, registerCommandHandlers } from "./command-handler"
 import { resolveDeviceUid } from "./device-uid"
 import { SessionTracker, startHeartbeat } from "./heartbeat"
@@ -45,9 +46,9 @@ function readPluginEnv(): {
  * 4. Emits a plugin.connected event via HTTP to signal readiness.
  * 5. Registers command handlers for permission/question unblock actions.
  * 6. Starts a heartbeat timer (15s interval) emitting plugin.heartbeat events.
+ * 7. Starts an activity sampler (15s interval) emitting device.activity events.
  *
- * Future extensions (activity, event forwarding) will be added
- * as separate work packages.
+ * Future extensions (event forwarding) will be added as separate work packages.
  */
 export const RemocodePlugin: Plugin = async ({ client, serverUrl }) => {
   let env: ReturnType<typeof readPluginEnv>
@@ -118,6 +119,13 @@ export const RemocodePlugin: Plugin = async ({ client, serverUrl }) => {
     pat,
     deviceUid,
     getActiveSessionIds: () => sessionTracker.getActiveSessionIds(),
+  })
+
+  // Start activity sampler (15s interval) — sends device.activity events
+  startActivitySampler({
+    backendUrl,
+    pat,
+    deviceUid,
   })
 
   return {
