@@ -1,6 +1,7 @@
 import { Stack } from "expo-router"
 import { Redirect } from "expo-router"
 import { useAuth } from "../../lib/auth-context"
+import { QueryProvider } from "../../lib/query-provider"
 
 export default function AppLayout() {
   const { session, isLoading } = useAuth()
@@ -16,8 +17,10 @@ export default function AppLayout() {
   }
 
   return (
-    <Stack screenOptions={{ headerShown: false }}>
-      <Stack.Screen name="index" />
-    </Stack>
+    <QueryProvider>
+      <Stack screenOptions={{ headerShown: false }}>
+        <Stack.Screen name="index" />
+      </Stack>
+    </QueryProvider>
   )
 }
