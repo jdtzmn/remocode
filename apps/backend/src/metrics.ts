@@ -99,10 +99,10 @@ export type MetricsRegistry = {
    */
   recordRelay(result: "success" | "offline" | "timeout" | "execution_failed" | "error"): void
   /**
-   * Record a notification decision.
-   * @param decision — "sent" | "suppressed"
+   * Record a notification decision or outcome.
+   * @param decision — "sent" | "suppressed" | "push_failure"
    */
-  recordNotification(decision: "sent" | "suppressed"): void
+  recordNotification(decision: "sent" | "suppressed" | "push_failure"): void
   /**
    * Record an app fetch duration (ms) for the named route.
    * @param route — short human-readable identifier e.g. "sessions.open"

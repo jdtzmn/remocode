@@ -1,5 +1,6 @@
 import { serve } from "@hono/node-server"
 
+import { createAlertEngine } from "./alerts"
 import { createApp } from "./app"
 import {
   createRuntimeAuthMiddlewares,
@@ -7,6 +8,8 @@ import {
   createRuntimeSupabaseJwtVerifier,
 } from "./auth/runtime"
 import { loadEnv, requireAuthEnv } from "./config/env"
+import { logger } from "./logger"
+import { globalMetrics } from "./metrics"
 import {
   createRuntimePatCreateService,
   runtimePatListService,
@@ -65,3 +68,19 @@ attachSocketServer(io, httpServer)
 
 // Start background job: mark stale sessions (60s threshold, runs every 30s)
 runtimeStaleEvaluatorJob.start()
+
+// Start alert engine (polls metrics every 30s, logs on state transitions)
+const alertEngine = createAlertEngine({
+  metrics: globalMetrics,
+  onAlert: (event) => {
+    const logFn = event.state === "firing" ? logger.error : logger.info
+    logFn(`alert:${event.state}`, {
+      alert_name: event.name,
+      alert_state: event.state,
+      alert_message: event.message,
+      fired_at: event.firedAt,
+      ...event.details,
+    })
+  },
+})
+alertEngine.start()
