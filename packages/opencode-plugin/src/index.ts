@@ -2,6 +2,7 @@ import type { Plugin } from "@opencode-ai/plugin"
 
 import { type OpenCodeClient, registerCommandHandlers } from "./command-handler"
 import { resolveDeviceUid } from "./device-uid"
+import { SessionTracker, startHeartbeat } from "./heartbeat"
 import { connectSocket, emitPluginConnected } from "./plugin-startup"
 import { createPluginSocket } from "./socket-client"
 
@@ -43,8 +44,9 @@ function readPluginEnv(): {
  * 3. Connects a Socket.IO socket to the backend /plugin namespace.
  * 4. Emits a plugin.connected event via HTTP to signal readiness.
  * 5. Registers command handlers for permission/question unblock actions.
+ * 6. Starts a heartbeat timer (15s interval) emitting plugin.heartbeat events.
  *
- * Future extensions (heartbeat, activity, event forwarding) will be added
+ * Future extensions (activity, event forwarding) will be added
  * as separate work packages.
  */
 export const RemocodePlugin: Plugin = async ({ client, serverUrl }) => {
@@ -107,5 +109,25 @@ export const RemocodePlugin: Plugin = async ({ client, serverUrl }) => {
     socket,
   })
 
-  return {}
+  // Create a session tracker that will be updated by the event hook
+  const sessionTracker = new SessionTracker()
+
+  // Start heartbeat timer (15s interval)
+  startHeartbeat({
+    backendUrl,
+    pat,
+    deviceUid,
+    getActiveSessionIds: () => sessionTracker.getActiveSessionIds(),
+  })
+
+  return {
+    event: async ({ event }) => {
+      // Track session lifecycle events so heartbeat can include active session IDs
+      if (event.type === "session.created" || event.type === "session.updated") {
+        sessionTracker.addSession(event.properties.info.id)
+      } else if (event.type === "session.deleted") {
+        sessionTracker.removeSession(event.properties.info.id)
+      }
+    },
+  }
 }
