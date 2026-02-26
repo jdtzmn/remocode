@@ -1,5 +1,7 @@
 import {
   ApiErrorSchema,
+  PatCreateResponseSchema,
+  PatListResponseSchema,
   RequestRespondAcceptedSchema,
   RequestsOpenResponseSchema,
   SessionsOpenResponseSchema,
@@ -10,6 +12,14 @@ import { z } from "zod"
 import { createApp } from "./app"
 import { createAppAuthMiddleware, createPluginAuthMiddleware } from "./auth/middleware"
 import { ApiHttpError } from "./http/errors"
+import {
+  type PatCreateService,
+  type PatListService,
+  type PatRevokeService,
+  createPatCreateService,
+  createPatListService,
+  createPatRevokeService,
+} from "./pats/service"
 import { createPluginActivityService } from "./plugin-activity/service"
 import type { PluginEventsIngestService } from "./plugin-events/ingest"
 import { createPluginHeartbeatService } from "./plugin-heartbeat/service"
@@ -20,6 +30,8 @@ import { createSessionsOpenService } from "./sessions/service"
 const validJwt = "jwt-valid"
 const validPat = "pat_validPrefix_validSecret"
 
+const TEST_PAT_PEPPER = "test-pepper"
+
 function createProtectedApp(
   options: {
     pluginHeartbeat?: ReturnType<typeof createPluginHeartbeatService>
@@ -28,6 +40,9 @@ function createProtectedApp(
     sessionsOpen?: ReturnType<typeof createSessionsOpenService>
     requestsOpen?: ReturnType<typeof createRequestsOpenService>
     requestsRespond?: RequestRespondService
+    patCreate?: ReturnType<typeof createPatCreateService>
+    patList?: ReturnType<typeof createPatListService>
+    patRevoke?: ReturnType<typeof createPatRevokeService>
   } = {},
 ) {
   return createApp({
@@ -92,6 +107,50 @@ function createProtectedApp(
         request_id: "default-request",
         relay: "sent" as const,
       })),
+    patCreate:
+      options.patCreate ??
+      createPatCreateService(
+        {
+          createPat: async ({ userId, label, tokenPrefix, createdAt }) => ({
+            id: "pat-stub-1",
+            userId,
+            label,
+            tokenPrefix,
+            createdAt,
+            lastUsedAt: null,
+            revokedAt: null,
+          }),
+          listPats: async () => [],
+          revokePat: async () => null,
+        },
+        TEST_PAT_PEPPER,
+      ),
+    patList:
+      options.patList ??
+      createPatListService({
+        createPat: async () => {
+          throw new Error("not used")
+        },
+        listPats: async () => [],
+        revokePat: async () => null,
+      }),
+    patRevoke:
+      options.patRevoke ??
+      createPatRevokeService({
+        createPat: async () => {
+          throw new Error("not used")
+        },
+        listPats: async () => [],
+        revokePat: async () => ({
+          id: "pat-stub-1",
+          userId: "user-1",
+          label: "stub",
+          tokenPrefix: "prefix",
+          createdAt: new Date(),
+          lastUsedAt: null,
+          revokedAt: new Date(),
+        }),
+      }),
   })
 }
 
@@ -620,5 +679,83 @@ describe("createApp", () => {
     await expect(response.json()).resolves.toMatchObject({
       error: { code: "UNAUTHORIZED" },
     })
+  })
+
+  it("creates a PAT and returns plaintext token", async () => {
+    const app = createProtectedApp()
+
+    const response = await app.request("/v1/pats", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${validJwt}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ label: "work-mac" }),
+    })
+    const body = await response.json()
+
+    expect(response.status).toBe(201)
+    expect(PatCreateResponseSchema.safeParse(body).success).toBe(true)
+    expect(body.label).toBe("work-mac")
+    expect(body.token).toMatch(/^pat_/)
+  })
+
+  it("returns INVALID_PAYLOAD when creating PAT without label", async () => {
+    const app = createProtectedApp()
+
+    const response = await app.request("/v1/pats", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${validJwt}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({}),
+    })
+    const body = await response.json()
+
+    expect(response.status).toBe(400)
+    expect(body).toMatchObject({ error: { code: "INVALID_PAYLOAD" } })
+  })
+
+  it("lists PATs for the authenticated user", async () => {
+    const app = createProtectedApp()
+
+    const response = await app.request("/v1/pats", {
+      headers: { authorization: `Bearer ${validJwt}` },
+    })
+    const body = await response.json()
+
+    expect(response.status).toBe(200)
+    expect(PatListResponseSchema.safeParse(body).success).toBe(true)
+    expect(body.pats).toEqual([])
+  })
+
+  it("revokes a PAT by id", async () => {
+    const app = createProtectedApp()
+
+    const response = await app.request("/v1/pats/pat-1/revoke", {
+      method: "POST",
+      headers: { authorization: `Bearer ${validJwt}` },
+    })
+    const body = await response.json()
+
+    expect(response.status).toBe(200)
+    expect(body).toEqual({ ok: true })
+  })
+
+  it("rejects PAT endpoints without auth", async () => {
+    const app = createProtectedApp()
+
+    const createRes = await app.request("/v1/pats", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ label: "test" }),
+    })
+    const listRes = await app.request("/v1/pats")
+    const revokeRes = await app.request("/v1/pats/pat-1/revoke", { method: "POST" })
+
+    expect(createRes.status).toBe(401)
+    expect(listRes.status).toBe(401)
+    expect(revokeRes.status).toBe(401)
   })
 })

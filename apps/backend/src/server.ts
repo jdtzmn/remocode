@@ -7,6 +7,11 @@ import {
   createRuntimeSupabaseJwtVerifier,
 } from "./auth/runtime"
 import { loadEnv, requireAuthEnv } from "./config/env"
+import {
+  createRuntimePatCreateService,
+  runtimePatListService,
+  runtimePatRevokeService,
+} from "./pats/runtime"
 import { runtimePluginActivityService } from "./plugin-activity/runtime"
 import { createRuntimePluginEventsIngestService } from "./plugin-events/runtime"
 import { runtimePluginHeartbeatService } from "./plugin-heartbeat/runtime"
@@ -40,6 +45,9 @@ const app = createApp({
   sessionsOpen: runtimeSessionsOpenService,
   requestsOpen: runtimeRequestsOpenService,
   requestsRespond: createRuntimeRequestRespondService(io, socketEmitter),
+  patCreate: createRuntimePatCreateService(authEnv.PAT_HASH_PEPPER),
+  patList: runtimePatListService,
+  patRevoke: runtimePatRevokeService,
 })
 
 const httpServer = serve({

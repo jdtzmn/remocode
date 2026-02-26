@@ -3,6 +3,7 @@ import type { MiddlewareHandler } from "hono"
 
 import type { AuthBindings } from "./auth/types"
 import { ApiHttpError, toApiErrorResponse, toApiHttpError } from "./http/errors"
+import type { PatCreateService, PatListService, PatRevokeService } from "./pats/service"
 import type { PluginActivityService } from "./plugin-activity/service"
 import type { PluginEventsIngestService } from "./plugin-events/ingest"
 import type { PluginHeartbeatService } from "./plugin-heartbeat/service"
@@ -19,6 +20,9 @@ type CreateAppOptions = {
   sessionsOpen?: SessionsOpenService
   requestsOpen?: RequestsOpenService
   requestsRespond?: RequestRespondService
+  patCreate?: PatCreateService
+  patList?: PatListService
+  patRevoke?: PatRevokeService
 }
 
 function rejectWithUnauthorized(message: string): MiddlewareHandler<AuthBindings> {
@@ -78,6 +82,30 @@ export function createApp(options: CreateAppOptions = {}) {
       })
     })
 
+  const patCreate =
+    options.patCreate ??
+    (async () => {
+      throw new ApiHttpError("INTERNAL_ERROR", {
+        message: "PAT create service is not configured",
+      })
+    })
+
+  const patList =
+    options.patList ??
+    (async () => {
+      throw new ApiHttpError("INTERNAL_ERROR", {
+        message: "PAT list service is not configured",
+      })
+    })
+
+  const patRevoke =
+    options.patRevoke ??
+    (async () => {
+      throw new ApiHttpError("INTERNAL_ERROR", {
+        message: "PAT revoke service is not configured",
+      })
+    })
+
   app.onError((error, context) => {
     const apiError = toApiHttpError(error)
 
@@ -129,6 +157,38 @@ export function createApp(options: CreateAppOptions = {}) {
     const auth = context.get("appAuth")
     const requestId = context.req.param("requestId")
     const response = await requestsRespond({ userId: auth.userId, requestId, payload: body })
+    return context.json(response)
+  })
+
+  app.use(
+    "/v1/pats/*",
+    options.appAuthMiddleware ?? rejectWithUnauthorized("App authentication is not configured"),
+  )
+
+  app.post("/v1/pats", async (context) => {
+    let body: unknown
+
+    try {
+      body = await context.req.json()
+    } catch {
+      throw new ApiHttpError("INVALID_PAYLOAD")
+    }
+
+    const auth = context.get("appAuth")
+    const response = await patCreate({ userId: auth.userId, payload: body })
+    return context.json(response, 201)
+  })
+
+  app.get("/v1/pats", async (context) => {
+    const auth = context.get("appAuth")
+    const response = await patList({ userId: auth.userId })
+    return context.json(response)
+  })
+
+  app.post("/v1/pats/:patId/revoke", async (context) => {
+    const auth = context.get("appAuth")
+    const patId = context.req.param("patId")
+    const response = await patRevoke({ userId: auth.userId, patId })
     return context.json(response)
   })
 
