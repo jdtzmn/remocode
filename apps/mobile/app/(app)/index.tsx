@@ -1,4 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query"
+import { useRouter } from "expo-router"
 import { useCallback } from "react"
 import {
   ActivityIndicator,
@@ -22,7 +23,7 @@ import {
   fetchSessionsOpen,
   respondToRequest,
 } from "../../lib/api"
-import { useAuth } from "../../lib/auth-context"
+
 import { useAttentionStore } from "../../lib/store"
 import { useRealtime } from "../../lib/use-realtime"
 import { crypto } from "../../lib/uuid"
@@ -44,7 +45,7 @@ function getErrorMessage(err: unknown): string {
 }
 
 export default function AttentionScreen() {
-  const { signOut } = useAuth()
+  const router = useRouter()
   const queryClient = useQueryClient()
   const { activeRequestId, setActiveRequestId, setRequestPending, isRequestPending } =
     useAttentionStore()
@@ -183,8 +184,11 @@ export default function AttentionScreen() {
             </Text>
           )}
         </View>
-        <TouchableOpacity onPress={signOut} style={styles.signOutButton}>
-          <Text style={styles.signOutText}>Sign out</Text>
+        <TouchableOpacity
+          onPress={() => router.push("/(app)/settings")}
+          style={styles.signOutButton}
+        >
+          <Text style={styles.signOutText}>Settings</Text>
         </TouchableOpacity>
       </View>
 

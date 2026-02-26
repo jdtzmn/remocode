@@ -149,6 +149,46 @@ export async function respondToRequest(
   })
 }
 
+// ─── PATs ──────────────────────────────────────────────────────────────────
+
+export interface Pat {
+  id: string
+  label: string
+  token_prefix: string
+  last_used_at: string | null
+  created_at: string
+}
+
+export interface PatsListResponse {
+  pats: Pat[]
+}
+
+export interface CreatePatRequest {
+  label: string
+}
+
+export interface CreatePatResponse {
+  id: string
+  label: string
+  token: string
+  created_at: string
+}
+
+export async function fetchPats(): Promise<PatsListResponse> {
+  return apiFetch<PatsListResponse>("/v1/pats")
+}
+
+export async function createPat(body: CreatePatRequest): Promise<CreatePatResponse> {
+  return apiFetch<CreatePatResponse>("/v1/pats", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+export async function revokePat(patId: string): Promise<void> {
+  await apiFetch<unknown>(`/v1/pats/${patId}/revoke`, { method: "POST" })
+}
+
 // ─── Push token ─────────────────────────────────────────────────────────────
 
 export interface RegisterPushTokenRequest {
