@@ -23,6 +23,7 @@ import {
 } from "../../lib/api"
 import { useAuth } from "../../lib/auth-context"
 import { useAttentionStore } from "../../lib/store"
+import { useRealtime } from "../../lib/use-realtime"
 import { crypto } from "../../lib/uuid"
 
 export default function AttentionScreen() {
@@ -30,6 +31,9 @@ export default function AttentionScreen() {
   const queryClient = useQueryClient()
   const { activeRequestId, setActiveRequestId, setRequestPending, isRequestPending } =
     useAttentionStore()
+
+  // ── Realtime socket updates ─────────────────────────────────────────────────
+  useRealtime()
 
   // ── Data fetching ──────────────────────────────────────────────────────────
   const {
