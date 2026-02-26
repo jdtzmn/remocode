@@ -2303,6 +2303,275 @@ describe("E2E: question unblock round-trip", () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// 8. E2E: Offline fail-fast
+// ---------------------------------------------------------------------------
+//
+// Scenario:
+//   1. session.created + permission.asked arrive via ingest → request is open
+//   2. No plugin socket is connected for the device
+//   3. App sends respond action → relay detects no socket → PLUGIN_OFFLINE
+//   4. Request remains open (status is still "open")
+//   5. Badge count unchanged
+//
+//   Variant: plugin connects, then disconnects — action after disconnect also returns PLUGIN_OFFLINE
+
+describe("E2E: offline fail-fast", () => {
+  let io: Server
+  let port: number
+  let closeServer: () => Promise<void>
+  const validPat = "pat_e2eoffline_testSecret"
+  const userId = "user-offline-e2e"
+  const deviceUid = "dev-offline-uid"
+
+  beforeEach(async () => {
+    io = new Server({ transports: ["websocket"] })
+    configurePluginNamespace(io, {
+      authenticate: async (token) => {
+        if (token !== validPat) throw new ApiHttpError("UNAUTHORIZED")
+        return { userId, patId: "pat-offline-e2e", tokenPrefix: "e2eoffline" }
+      },
+      getOrCreateDeviceId: async () => `device:${userId}:${deviceUid}`,
+    })
+    const server = await startTestServer(io)
+    port = server.port
+    closeServer = server.close
+  })
+
+  afterEach(async () => {
+    await closeServer()
+  })
+
+  /**
+   * Creates a relay that mirrors the production createPluginRelay's online check:
+   * - fetchSockets() to confirm at least one socket is in the device room
+   * - throw PLUGIN_OFFLINE if none found
+   * - otherwise emit command and wait for ack
+   */
+  function createOnlineCheckingRelay(
+    ioServer: Server,
+    timeoutMs = 3000,
+  ): (args: {
+    deviceId: string
+    envelope: PluginCommandEnvelope
+    eventType: "action.permission.reply" | "action.question.reply" | "action.question.reject"
+  }) => Promise<PluginAckEnvelope> {
+    return async (args) => {
+      const pluginNs = ioServer.of("/plugin")
+      const room = `device:${args.deviceId}`
+
+      // Check if there's at least one socket in the device room (mirrors production behavior)
+      const sockets = await pluginNs.in(room).fetchSockets()
+      if (sockets.length === 0) {
+        throw new ApiHttpError("PLUGIN_OFFLINE")
+      }
+
+      return new Promise<PluginAckEnvelope>((resolve, reject) => {
+        pluginNs
+          .to(room)
+          .timeout(timeoutMs)
+          .emit(args.eventType, args.envelope, (err: Error | null, acks: PluginAckEnvelope[]) => {
+            if (err || !acks || acks.length === 0) {
+              reject(new ApiHttpError("RELAY_TIMEOUT"))
+            } else {
+              resolve(acks[0])
+            }
+          })
+      })
+    }
+  }
+
+  it("permission action when plugin is never connected returns PLUGIN_OFFLINE, request stays open", async () => {
+    const stores = createOrderingStores()
+    const { ingest, sessionsOpen } = createFullOrderingServices(stores)
+
+    // Step 1: session.created + permission.asked via ingest
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          sessionCreatedEvent("cc000001-cccc-4ccc-8ccc-cccccccccccc", {
+            deviceUid,
+            sessionId: "session-offline-perm",
+            title: "Offline Fail-fast Session",
+          }),
+        ],
+      },
+    })
+
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          permissionAskedEvent("cc000002-cccc-4ccc-8ccc-cccccccccccc", {
+            deviceUid,
+            requestId: "perm-offline-e2e",
+            sessionId: "session-offline-perm",
+          }),
+        ],
+      },
+    })
+
+    // Verify: request is open, badge=1
+    expect(stores.requests.get("perm-offline-e2e")?.status).toBe("open")
+    const before = await sessionsOpen({ userId })
+    expect(before.groups[0].sessions[0].requires_attention).toBe(true)
+    expect(before.groups[0].sessions[0].attention_count).toBe(1)
+
+    // Step 2: Attempt to respond — no plugin socket connected
+    const relay = createOnlineCheckingRelay(io)
+    const respondService = createRequestRespondService(stores.respondStore, relay)
+
+    await expect(
+      respondService({
+        userId,
+        requestId: "perm-offline-e2e",
+        payload: {
+          type: "permission",
+          decision: "once",
+          client_action_id: "cc000003-cccc-4ccc-8ccc-cccccccccccc",
+        },
+      }),
+    ).rejects.toMatchObject({ code: "PLUGIN_OFFLINE" })
+
+    // Step 3: Request must still be open
+    expect(stores.requests.get("perm-offline-e2e")?.status).toBe("open")
+
+    // Badge and attention flag unchanged
+    const after = await sessionsOpen({ userId })
+    expect(after.groups[0].sessions[0].requires_attention).toBe(true)
+    expect(after.groups[0].sessions[0].attention_count).toBe(1)
+
+    // Action attempt saved as failed with PLUGIN_OFFLINE code
+    const savedAttempt = stores.actionAttempts.get(`${userId}:cc000003-cccc-4ccc-8ccc-cccccccccccc`)
+    expect(savedAttempt?.status).toBe("failed")
+    expect(savedAttempt?.errorCode).toBe("PLUGIN_OFFLINE")
+  })
+
+  it("question action when plugin is never connected returns PLUGIN_OFFLINE, request stays open", async () => {
+    const stores = createOrderingStores()
+    const { ingest } = createFullOrderingServices(stores)
+
+    // session.created + question.asked via ingest
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          sessionCreatedEvent("dd000001-dddd-4ddd-8ddd-dddddddddddd", {
+            deviceUid,
+            sessionId: "session-offline-quest",
+            title: "Offline Question Session",
+          }),
+          questionAskedEvent("dd000002-dddd-4ddd-8ddd-dddddddddddd", {
+            deviceUid,
+            requestId: "quest-offline-e2e",
+            sessionId: "session-offline-quest",
+          }),
+        ],
+      },
+    })
+
+    expect(stores.requests.get("quest-offline-e2e")?.status).toBe("open")
+
+    const relay = createOnlineCheckingRelay(io)
+    const respondService = createRequestRespondService(stores.respondStore, relay)
+
+    await expect(
+      respondService({
+        userId,
+        requestId: "quest-offline-e2e",
+        payload: {
+          type: "question",
+          answers: [["All"]],
+          client_action_id: "dd000003-dddd-4ddd-8ddd-dddddddddddd",
+        },
+      }),
+    ).rejects.toMatchObject({ code: "PLUGIN_OFFLINE" })
+
+    // Request remains open
+    expect(stores.requests.get("quest-offline-e2e")?.status).toBe("open")
+
+    // Action attempt saved as failed
+    const savedAttempt = stores.actionAttempts.get(`${userId}:dd000003-dddd-4ddd-8ddd-dddddddddddd`)
+    expect(savedAttempt?.status).toBe("failed")
+    expect(savedAttempt?.errorCode).toBe("PLUGIN_OFFLINE")
+  })
+
+  it("action after plugin disconnects returns PLUGIN_OFFLINE, request stays open", async () => {
+    const stores = createOrderingStores()
+    const { ingest, sessionsOpen } = createFullOrderingServices(stores)
+
+    // Step 1: session.created + permission.asked via ingest
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          sessionCreatedEvent("ee000001-eeee-4eee-8eee-eeeeeeeeeeee", {
+            deviceUid,
+            sessionId: "session-disconnect-perm",
+            title: "Disconnect Test Session",
+          }),
+        ],
+      },
+    })
+
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          permissionAskedEvent("ee000002-eeee-4eee-8eee-eeeeeeeeeeee", {
+            deviceUid,
+            requestId: "perm-disconnect-e2e",
+            sessionId: "session-disconnect-perm",
+          }),
+        ],
+      },
+    })
+
+    // Step 2: Connect plugin, then disconnect it
+    const pluginClient = ioc(`http://127.0.0.1:${port}/plugin`, {
+      transports: ["websocket"],
+      auth: { token: validPat, device_uid: deviceUid },
+    })
+
+    await new Promise<void>((resolve, reject) => {
+      pluginClient.on("connect", resolve)
+      pluginClient.on("connect_error", reject)
+    })
+    // Wait for room join to propagate
+    await new Promise<void>((resolve) => setTimeout(resolve, 100))
+
+    // Disconnect the plugin
+    pluginClient.disconnect()
+    // Wait for server to process disconnect
+    await new Promise<void>((resolve) => setTimeout(resolve, 200))
+
+    // Step 3: Attempt to respond — plugin is now offline
+    const relay = createOnlineCheckingRelay(io)
+    const respondService = createRequestRespondService(stores.respondStore, relay)
+
+    await expect(
+      respondService({
+        userId,
+        requestId: "perm-disconnect-e2e",
+        payload: {
+          type: "permission",
+          decision: "reject",
+          client_action_id: "ee000003-eeee-4eee-8eee-eeeeeeeeeeee",
+        },
+      }),
+    ).rejects.toMatchObject({ code: "PLUGIN_OFFLINE" })
+
+    // Request must still be open (not closed)
+    expect(stores.requests.get("perm-disconnect-e2e")?.status).toBe("open")
+
+    // Badge and attention flag unchanged
+    const after = await sessionsOpen({ userId })
+    expect(after.groups[0].sessions[0].requires_attention).toBe(true)
+    expect(after.groups[0].sessions[0].attention_count).toBe(1)
+  })
+})
+
 describe("E2E: multi-device ordering", () => {
   it("blocker on lower-ranked device moves its device group to the top", async () => {
     const stores = createOrderingStores()
