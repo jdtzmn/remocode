@@ -7,6 +7,7 @@ import {
 } from "@remocode/contracts"
 import { z } from "zod"
 
+import type { AttentionRequestReducer } from "../attention-requests/reducer"
 import { ApiHttpError } from "../http/errors"
 import type { SessionProjectionReducer } from "../session-projections/reducer"
 
@@ -28,6 +29,7 @@ type PersistedEventStore = {
   getOrCreateDeviceId: (args: { userId: string; deviceUid: string }) => Promise<string>
   persistEvent: (input: PersistInput) => Promise<PersistResult>
   projectEvent?: SessionProjectionReducer
+  projectAttention?: AttentionRequestReducer
 }
 
 export type PluginEventsIngestService = (args: {
@@ -104,13 +106,23 @@ export function createPluginEventsIngestService(
           deduped += 1
         } else {
           accepted += 1
+          const receivedAt = new Date()
 
           if (store.projectEvent) {
             await store.projectEvent({
               event,
               userId,
               deviceId,
-              receivedAt: new Date(),
+              receivedAt,
+            })
+          }
+
+          if (store.projectAttention) {
+            await store.projectAttention({
+              event,
+              userId,
+              deviceId,
+              receivedAt,
             })
           }
         }

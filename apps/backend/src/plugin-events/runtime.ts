@@ -1,3 +1,4 @@
+import { runtimeAttentionRequestReducer } from "../attention-requests/runtime"
 import { db } from "../db"
 import { sessionEvents } from "../db/schema"
 import { getOrCreateDeviceIdForUser } from "../devices/repository"
@@ -26,4 +27,5 @@ export const runtimePluginEventsIngestService = createPluginEventsIngestService(
     return inserted.length === 0 ? "deduped" : "accepted"
   },
   projectEvent: runtimeSessionProjectionReducer,
+  projectAttention: runtimeAttentionRequestReducer,
 })
