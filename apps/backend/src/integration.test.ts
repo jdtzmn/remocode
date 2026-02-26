@@ -2832,3 +2832,326 @@ describe("E2E: multi-device ordering", () => {
     expect(afterResolved.groups[1].device.id).toBe(deviceBId)
   })
 })
+
+// ---------------------------------------------------------------------------
+// 9. E2E: Notification suppression
+// ---------------------------------------------------------------------------
+//
+// Scenario:
+//   Active device:
+//     - device has a fresh activity sample (is_active=true, idle_seconds < 120)
+//     - permission.asked ingested → notification engine suppresses (device active)
+//     - notification_log entry written as "suppressed"
+//     - push sender NOT called
+//
+//   Inactive/unknown device:
+//     - device has no activity sample, or sample is stale, or is_active=false
+//     - permission.asked ingested → notification engine sends (fail-open)
+//     - notification_log entry written as "sent"
+//     - push sender called
+
+import type { NotificationEngineStore } from "./notifications/engine"
+import { createNotificationEngine } from "./notifications/engine"
+import type { ActivitySample } from "./notifications/suppression"
+
+describe("E2E: notification suppression", () => {
+  const userId = "user-notif-e2e"
+  const deviceUid = "dev-notif-uid"
+
+  /**
+   * Build an in-memory notification engine store backed by a mutable activity map.
+   * Returns the store and a helper to set the current device activity sample.
+   */
+  function createNotificationStores() {
+    const activityMap: Map<string, ActivitySample> = new Map()
+    const notifLog: Array<{
+      userId: string
+      deviceId: string
+      requestId: string
+      decision: "sent" | "suppressed"
+      reason: string
+      payload: Record<string, unknown>
+    }> = []
+    const pushCalls: Array<{ userId: string; title: string; body: string }> = []
+
+    const notificationEngineStore: NotificationEngineStore = {
+      getDeviceActivity: async (deviceId: string) => activityMap.get(deviceId) ?? null,
+      logNotification: async (entry) => {
+        notifLog.push(entry)
+      },
+      hasNotificationForRequest: async (requestId: string) =>
+        notifLog.some((e) => e.requestId === requestId),
+      pushSender: {
+        sendToUser: async (uid, msg) => {
+          pushCalls.push({ userId: uid, title: msg.title, body: msg.body })
+          return { sent: 1, failed: 0 }
+        },
+      },
+    }
+
+    return {
+      activityMap,
+      notifLog,
+      pushCalls,
+      notificationEngineStore,
+    }
+  }
+
+  /**
+   * Create an ingest service wired up with the notification engine.
+   * Uses the ordering stores (with real updateSessionAttention) plus the notification engine.
+   */
+  function createNotifOrderingServices(
+    stores: ReturnType<typeof createOrderingStores>,
+    notifStores: ReturnType<typeof createNotificationStores>,
+  ) {
+    const projectEvent = createSessionProjectionReducer(stores.sessionProjectionStore)
+    const projectAttention = createAttentionRequestReducer(stores.attentionRequestStore)
+    const notificationEngine = createNotificationEngine(notifStores.notificationEngineStore)
+
+    const ingest = createPluginEventsIngestService({
+      ...stores.ingestStore,
+      projectEvent,
+      projectAttention,
+      notificationEngine,
+      getBlockerContext: async ({ sessionId, deviceId }) => {
+        const session = stores.sessions.get(sessionId)
+        return {
+          sessionTitle: session?.title ?? null,
+          deviceName: deviceId,
+        }
+      },
+    })
+
+    const sessionsOpen = createSessionsOpenService(stores.sessionsOpenStore)
+    return { ingest, sessionsOpen }
+  }
+
+  it("active device — permission.asked is suppressed and push is NOT sent", async () => {
+    const stores = createOrderingStores()
+    const notifStores = createNotificationStores()
+    const { ingest } = createNotifOrderingServices(stores, notifStores)
+
+    const deviceId = `device:${userId}:${deviceUid}`
+
+    // Set fresh active activity sample for the device
+    notifStores.activityMap.set(deviceId, {
+      isActive: true,
+      idleSeconds: 10,
+      sampledAt: new Date(), // fresh sample (now)
+    })
+
+    // Ingest session.created + permission.asked
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          sessionCreatedEvent("aa110001-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+            deviceUid,
+            sessionId: "session-notif-suppress",
+            title: "Suppression Test Session",
+          }),
+          permissionAskedEvent("aa110002-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+            deviceUid,
+            requestId: "perm-notif-suppress",
+            sessionId: "session-notif-suppress",
+          }),
+        ],
+      },
+    })
+
+    // Notification engine runs asynchronously (fire-and-forget); wait for it to settle
+    await new Promise<void>((resolve) => setTimeout(resolve, 50))
+
+    // Notification should be suppressed
+    expect(notifStores.notifLog).toHaveLength(1)
+    expect(notifStores.notifLog[0].decision).toBe("suppressed")
+    expect(notifStores.notifLog[0].reason).toBe("device_active")
+    expect(notifStores.notifLog[0].requestId).toBe("perm-notif-suppress")
+
+    // Push sender must NOT have been called
+    expect(notifStores.pushCalls).toHaveLength(0)
+  })
+
+  it("inactive device — permission.asked sends push notification", async () => {
+    const stores = createOrderingStores()
+    const notifStores = createNotificationStores()
+    const { ingest } = createNotifOrderingServices(stores, notifStores)
+
+    const deviceId = `device:${userId}:${deviceUid}`
+
+    // Set fresh but INACTIVE activity sample
+    notifStores.activityMap.set(deviceId, {
+      isActive: false,
+      idleSeconds: 300,
+      sampledAt: new Date(), // fresh sample but not active
+    })
+
+    // Ingest session.created + permission.asked
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          sessionCreatedEvent("bb110001-bbbb-4bbb-8bbb-bbbbbbbbbbbb", {
+            deviceUid,
+            sessionId: "session-notif-inactive",
+            title: "Inactive Device Session",
+          }),
+          permissionAskedEvent("bb110002-bbbb-4bbb-8bbb-bbbbbbbbbbbb", {
+            deviceUid,
+            requestId: "perm-notif-inactive",
+            sessionId: "session-notif-inactive",
+          }),
+        ],
+      },
+    })
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 50))
+
+    // Notification should be sent (device not active)
+    expect(notifStores.notifLog).toHaveLength(1)
+    expect(notifStores.notifLog[0].decision).toBe("sent")
+    expect(notifStores.notifLog[0].reason).toBe("device_inactive")
+    expect(notifStores.notifLog[0].requestId).toBe("perm-notif-inactive")
+
+    // Push sender was called with notification payload
+    expect(notifStores.pushCalls).toHaveLength(1)
+    expect(notifStores.pushCalls[0].userId).toBe(userId)
+    expect(notifStores.pushCalls[0].title).toBe("Action needed: Inactive Device Session")
+  })
+
+  it("no activity sample (unknown device) — question.asked sends push notification", async () => {
+    const stores = createOrderingStores()
+    const notifStores = createNotificationStores()
+    const { ingest } = createNotifOrderingServices(stores, notifStores)
+
+    // No activity sample set — device activity is unknown
+
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          sessionCreatedEvent("cc110001-cccc-4ccc-8ccc-cccccccccccc", {
+            deviceUid,
+            sessionId: "session-notif-unknown",
+            title: "Unknown Activity Session",
+          }),
+          questionAskedEvent("cc110002-cccc-4ccc-8ccc-cccccccccccc", {
+            deviceUid,
+            requestId: "quest-notif-unknown",
+            sessionId: "session-notif-unknown",
+          }),
+        ],
+      },
+    })
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 50))
+
+    // Notification should be sent (fail-open for unknown activity)
+    expect(notifStores.notifLog).toHaveLength(1)
+    expect(notifStores.notifLog[0].decision).toBe("sent")
+    expect(notifStores.notifLog[0].reason).toBe("no_activity_sample")
+    expect(notifStores.notifLog[0].requestId).toBe("quest-notif-unknown")
+
+    // Push sender was called
+    expect(notifStores.pushCalls).toHaveLength(1)
+    expect(notifStores.pushCalls[0].userId).toBe(userId)
+  })
+
+  it("stale activity sample — permission.asked sends push notification", async () => {
+    const stores = createOrderingStores()
+    const notifStores = createNotificationStores()
+    const { ingest } = createNotifOrderingServices(stores, notifStores)
+
+    const deviceId = `device:${userId}:${deviceUid}`
+
+    // Stale sample: 60 seconds ago (> 45s freshness threshold)
+    const staleTime = new Date(Date.now() - 60_000)
+    notifStores.activityMap.set(deviceId, {
+      isActive: true,
+      idleSeconds: 5,
+      sampledAt: staleTime,
+    })
+
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          sessionCreatedEvent("dd110001-dddd-4ddd-8ddd-dddddddddddd", {
+            deviceUid,
+            sessionId: "session-notif-stale",
+            title: "Stale Activity Session",
+          }),
+          permissionAskedEvent("dd110002-dddd-4ddd-8ddd-dddddddddddd", {
+            deviceUid,
+            requestId: "perm-notif-stale",
+            sessionId: "session-notif-stale",
+          }),
+        ],
+      },
+    })
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 50))
+
+    // Stale sample defaults to send (fail-open)
+    expect(notifStores.notifLog).toHaveLength(1)
+    expect(notifStores.notifLog[0].decision).toBe("sent")
+    expect(notifStores.notifLog[0].reason).toBe("stale_sample")
+
+    // Push sender was called
+    expect(notifStores.pushCalls).toHaveLength(1)
+  })
+
+  it("dedup: second permission.asked for same request_id does not send a second notification", async () => {
+    const stores = createOrderingStores()
+    const notifStores = createNotificationStores()
+    const { ingest } = createNotifOrderingServices(stores, notifStores)
+
+    // No activity → send path
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          sessionCreatedEvent("ee110001-eeee-4eee-8eee-eeeeeeeeeeee", {
+            deviceUid,
+            sessionId: "session-notif-dedup",
+            title: "Dedup Session",
+          }),
+          permissionAskedEvent("ee110002-eeee-4eee-8eee-eeeeeeeeeeee", {
+            deviceUid,
+            requestId: "perm-notif-dedup",
+            sessionId: "session-notif-dedup",
+          }),
+        ],
+      },
+    })
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 50))
+
+    // First notification sent
+    expect(notifStores.notifLog).toHaveLength(1)
+    expect(notifStores.pushCalls).toHaveLength(1)
+
+    // Ingest the same permission.asked event again (different event_id but same request_id)
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          permissionAskedEvent("ee110003-eeee-4eee-8eee-eeeeeeeeeeee", {
+            deviceUid,
+            requestId: "perm-notif-dedup",
+            sessionId: "session-notif-dedup",
+          }),
+        ],
+      },
+    })
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 50))
+
+    // Second notification is skipped before logging (already_notified short-circuit)
+    // The notification log still only has 1 entry (no "suppressed" log is written for dedup)
+    expect(notifStores.notifLog).toHaveLength(1)
+    // Push sender still called only once
+    expect(notifStores.pushCalls).toHaveLength(1)
+  })
+})
