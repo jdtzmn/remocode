@@ -36,6 +36,11 @@ export type NotificationLogEntry = {
 export type NotificationEngineStore = {
   getDeviceActivity: (deviceId: string) => Promise<ActivitySample | null>
   logNotification: (entry: NotificationLogEntry) => Promise<void>
+  /**
+   * Returns true if a notification has already been logged for this request_id.
+   * Used to enforce exactly-once notification per unique open request.
+   */
+  hasNotificationForRequest: (requestId: string) => Promise<boolean>
   /** Optional push sender — if omitted, no push is sent (useful for testing). */
   pushSender?: PushSender
 }
@@ -53,6 +58,17 @@ export type NotificationEngine = {
 export function createNotificationEngine(store: NotificationEngineStore): NotificationEngine {
   return {
     handleBlocker: async (trigger) => {
+      // Dedup check: exactly one notification per unique open request_id.
+      // If we've already logged a notification for this request, skip silently.
+      try {
+        const alreadyNotified = await store.hasNotificationForRequest(trigger.requestId)
+        if (alreadyNotified) {
+          return { decision: "suppress", reason: "already_notified" }
+        }
+      } catch {
+        // Fail-open: if we can't check dedup, proceed with normal evaluation.
+      }
+
       let decision: SuppressionDecision
 
       try {

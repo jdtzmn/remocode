@@ -1,4 +1,4 @@
-import { and, eq, isNull } from "drizzle-orm"
+import { and, eq, isNull, sql } from "drizzle-orm"
 
 import { loadEnv } from "../config/env"
 import { db } from "../db"
@@ -70,6 +70,16 @@ export const runtimeNotificationEngine = createNotificationEngine({
       payload,
       createdAt: new Date(),
     })
+  },
+
+  hasNotificationForRequest: async (requestId) => {
+    const rows = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(notificationLog)
+      .where(eq(notificationLog.requestId, requestId))
+      .limit(1)
+
+    return (rows[0]?.count ?? 0) > 0
   },
 
   pushSender: runtimePushSender,

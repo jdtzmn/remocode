@@ -28,6 +28,7 @@ function makeStore(overrides: Partial<NotificationEngineStore> = {}): Notificati
   return {
     getDeviceActivity: vi.fn().mockResolvedValue(null),
     logNotification: vi.fn().mockResolvedValue(undefined),
+    hasNotificationForRequest: vi.fn().mockResolvedValue(false),
     ...overrides,
   }
 }
@@ -225,5 +226,71 @@ describe("createNotificationEngine", () => {
 
     // Should resolve normally without any push sender
     await expect(engine.handleBlocker(makeTrigger())).resolves.toMatchObject({ decision: "send" })
+  })
+
+  describe("per-request_id dedup", () => {
+    it("suppresses with reason already_notified when notification already exists for request_id", async () => {
+      const store = makeStore({
+        hasNotificationForRequest: vi.fn().mockResolvedValue(true),
+      })
+
+      const engine = createNotificationEngine(store)
+      const result = await engine.handleBlocker(makeTrigger())
+
+      expect(result.decision).toBe("suppress")
+      expect(result.reason).toBe("already_notified")
+    })
+
+    it("does not log or send push when already_notified dedup short-circuits", async () => {
+      const pushSender = makePushSender()
+      const store = makeStore({
+        hasNotificationForRequest: vi.fn().mockResolvedValue(true),
+        pushSender,
+      })
+
+      const engine = createNotificationEngine(store)
+      await engine.handleBlocker(makeTrigger())
+
+      expect(store.logNotification).not.toHaveBeenCalled()
+      expect(pushSender.sendToUser).not.toHaveBeenCalled()
+    })
+
+    it("checks dedup with the correct request_id", async () => {
+      const store = makeStore({
+        hasNotificationForRequest: vi.fn().mockResolvedValue(false),
+      })
+
+      const engine = createNotificationEngine(store)
+      await engine.handleBlocker(makeTrigger({ requestId: "req-special" }))
+
+      expect(store.hasNotificationForRequest).toHaveBeenCalledWith("req-special")
+    })
+
+    it("proceeds normally (fail-open) when hasNotificationForRequest throws", async () => {
+      const store = makeStore({
+        hasNotificationForRequest: vi.fn().mockRejectedValue(new Error("DB error")),
+        getDeviceActivity: vi.fn().mockResolvedValue(null), // no activity -> send
+      })
+
+      const engine = createNotificationEngine(store)
+      const result = await engine.handleBlocker(makeTrigger())
+
+      // Should fall through to normal evaluation and send
+      expect(result.decision).toBe("send")
+      expect(store.logNotification).toHaveBeenCalledOnce()
+    })
+
+    it("sends when request_id is new (not yet in log)", async () => {
+      const store = makeStore({
+        hasNotificationForRequest: vi.fn().mockResolvedValue(false),
+        getDeviceActivity: vi.fn().mockResolvedValue(null), // no sample -> send
+      })
+
+      const engine = createNotificationEngine(store)
+      const result = await engine.handleBlocker(makeTrigger())
+
+      expect(result.decision).toBe("send")
+      expect(store.logNotification).toHaveBeenCalledOnce()
+    })
   })
 })
