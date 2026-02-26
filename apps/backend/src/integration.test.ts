@@ -28,6 +28,8 @@ import type {
   SessionProjectionStore,
   SessionProjectionUpdate,
 } from "./session-projections/reducer"
+import { createSessionsOpenService } from "./sessions/service"
+import type { OpenSessionRow } from "./sessions/service"
 import { configurePluginNamespace } from "./socket/plugin-namespace"
 import type { PluginAckEnvelope, PluginCommandEnvelope } from "./socket/types"
 
@@ -1314,5 +1316,444 @@ describe("Integration: multi-user data isolation", () => {
     })
     expect(resultB.status).toBe("accepted")
     expect(relayCalled).toBe(2) // relay was called independently for user-B
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 5. E2E: Multi-device ordering — blocker on lower-ranked device moves group to top
+// ---------------------------------------------------------------------------
+
+/**
+ * Creates a fully wired in-memory store where updateSessionAttention actually updates
+ * session projections, enabling end-to-end ordering tests through createSessionsOpenService.
+ */
+function createOrderingStores() {
+  const events: EventRecord[] = []
+  const sessions: Map<string, SessionRecord> = new Map()
+  const requests: Map<string, RequestRecord> = new Map()
+  const deviceMap: Map<string, string> = new Map() // "userId:deviceUid" -> deviceId
+
+  const ingestStore = {
+    getOrCreateDeviceId: async ({ userId, deviceUid }: { userId: string; deviceUid: string }) => {
+      const key = `${userId}:${deviceUid}`
+      if (!deviceMap.has(key)) {
+        deviceMap.set(key, `device:${userId}:${deviceUid}`)
+      }
+      return deviceMap.get(key) as string
+    },
+    persistEvent: async ({
+      userId,
+      deviceId,
+      event,
+    }: {
+      userId: string
+      deviceId: string
+      event: { event_id: string; event_type: string; session_id?: string | null; payload: unknown }
+    }) => {
+      const existing = events.find((e) => e.eventId === event.event_id)
+      if (existing) return "deduped" as const
+      events.push({
+        eventId: event.event_id,
+        userId,
+        deviceId,
+        eventType: event.event_type,
+        sessionId: event.session_id ?? null,
+        payload: event.payload,
+      })
+      return "accepted" as const
+    },
+  }
+
+  const sessionProjectionStore: SessionProjectionStore = {
+    upsertSession: async (input: SessionProjectionInput & SessionProjectionUpdate) => {
+      const existing = sessions.get(input.sessionId)
+      sessions.set(input.sessionId, {
+        sessionId: input.sessionId,
+        userId: input.userId,
+        deviceId: input.deviceId,
+        receivedAt: input.receivedAt,
+        title: input.title !== undefined ? (input.title ?? null) : (existing?.title ?? null),
+        directory:
+          input.directory !== undefined ? (input.directory ?? null) : (existing?.directory ?? null),
+        sessionState: input.sessionState ?? existing?.sessionState ?? "unknown",
+        isOpen: input.isOpen ?? existing?.isOpen ?? true,
+        requiresAttention: input.requiresAttention ?? existing?.requiresAttention ?? false,
+        lastEventAt: input.lastEventAt ?? existing?.lastEventAt ?? input.receivedAt,
+        isStale: existing?.isStale ?? false,
+        attentionCount: existing?.attentionCount ?? 0,
+        lastAttentionAt: existing?.lastAttentionAt ?? null,
+      })
+    },
+    updateSession: async (sessionId: string, userId: string, update: SessionProjectionUpdate) => {
+      const existing = sessions.get(sessionId)
+      if (existing && existing.userId === userId) {
+        sessions.set(sessionId, { ...existing, ...update })
+      }
+    },
+    updateSessionsHeartbeat: async () => {},
+  }
+
+  const attentionRequestStore: AttentionRequestStore = {
+    upsertRequest: async (input: AttentionRequestInput) => {
+      const existing = requests.get(input.requestId)
+      requests.set(input.requestId, {
+        ...input,
+        status: existing?.status ?? "open",
+      })
+    },
+    closeRequest: async ({
+      requestId,
+      status,
+    }: {
+      requestId: string
+      userId: string
+      status: "resolved" | "rejected"
+      resolvedAt: Date
+    }) => {
+      const existing = requests.get(requestId)
+      if (existing) {
+        requests.set(requestId, { ...existing, status })
+      }
+    },
+    countOpenRequests: async ({ sessionId, userId }: { sessionId: string; userId: string }) =>
+      [...requests.values()].filter(
+        (r) => r.sessionId === sessionId && r.userId === userId && r.status === "open",
+      ).length,
+    // Real implementation: update the session projection so ordering reflects attention state
+    updateSessionAttention: async ({
+      sessionId,
+      userId,
+      attentionCount,
+      requiresAttention,
+      lastAttentionAt,
+    }: {
+      sessionId: string
+      userId: string
+      attentionCount: number
+      requiresAttention: boolean
+      lastAttentionAt: Date | null
+    }) => {
+      const existing = sessions.get(sessionId)
+      if (existing && existing.userId === userId) {
+        sessions.set(sessionId, {
+          ...existing,
+          attentionCount,
+          requiresAttention,
+          lastAttentionAt,
+        })
+      }
+    },
+  }
+
+  // Build a sessions-open store that reads directly from our in-memory sessions map
+  const sessionsOpenStore = {
+    getOpenSessions: async ({ userId }: { userId: string }): Promise<OpenSessionRow[]> => {
+      return [...sessions.values()]
+        .filter((s) => s.userId === userId && s.isOpen)
+        .map((s) => ({
+          sessionId: s.sessionId,
+          title: s.title,
+          sessionState: s.sessionState,
+          requiresAttention: s.requiresAttention,
+          attentionCount: s.attentionCount,
+          lastEventAt: s.lastEventAt,
+          lastAttentionAt: s.lastAttentionAt,
+          isStale: s.isStale,
+          deviceId: s.deviceId,
+          // Use device ID as the name for simple inspection in tests
+          deviceName: s.deviceId,
+          devicePlatform: "darwin",
+          deviceLastSeenAt: null,
+          activityIsActive: null,
+          activityIdleSeconds: null,
+          activitySampledAt: null,
+        }))
+    },
+  }
+
+  return {
+    events,
+    sessions,
+    requests,
+    ingestStore,
+    sessionProjectionStore,
+    attentionRequestStore,
+    sessionsOpenStore,
+  }
+}
+
+function createFullOrderingServices(stores: ReturnType<typeof createOrderingStores>) {
+  const projectEvent = createSessionProjectionReducer(stores.sessionProjectionStore)
+  const projectAttention = createAttentionRequestReducer(stores.attentionRequestStore)
+
+  const ingest = createPluginEventsIngestService({
+    ...stores.ingestStore,
+    projectEvent,
+    projectAttention,
+  })
+
+  const sessionsOpen = createSessionsOpenService(stores.sessionsOpenStore)
+
+  return { ingest, sessionsOpen }
+}
+
+describe("E2E: multi-device ordering", () => {
+  it("blocker on lower-ranked device moves its device group to the top", async () => {
+    const stores = createOrderingStores()
+    const { ingest, sessionsOpen } = createFullOrderingServices(stores)
+    const userId = "user-e2e"
+
+    // Device A: more recent last event (should start ranked first)
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          sessionCreatedEvent("11111111-1111-4111-8111-111111111111", {
+            deviceUid: "dev-A",
+            sessionId: "session-A",
+            title: "Device A Session",
+          }),
+        ],
+      },
+    })
+
+    // Give device A a more recent lastEventAt by patching via a status event
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          {
+            event_id: "22222222-2222-4222-8222-222222222222",
+            adapter: "opencode",
+            adapter_version: "1.0.0",
+            device_uid: "dev-A",
+            event_type: "session.status",
+            session_id: "session-A",
+            occurred_at: "2026-02-22T10:05:00.000Z",
+            payload: { sessionID: "session-A", status: { type: "busy" } },
+          },
+        ],
+      },
+    })
+
+    // Device B: older last event (should start ranked second)
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          sessionCreatedEvent("33333333-3333-4333-8333-333333333333", {
+            deviceUid: "dev-B",
+            sessionId: "session-B",
+            title: "Device B Session",
+          }),
+        ],
+      },
+    })
+
+    // Manually set device B's session lastEventAt to be older than device A's
+    const sessionB = stores.sessions.get("session-B")
+    if (sessionB) {
+      stores.sessions.set("session-B", {
+        ...sessionB,
+        lastEventAt: new Date("2026-02-22T09:00:00.000Z"),
+      })
+    }
+
+    // Initial ordering check: device A should be first (more recent activity)
+    const initialResult = await sessionsOpen({ userId })
+    expect(initialResult.groups).toHaveLength(2)
+    const deviceAId = `device:${userId}:dev-A`
+    const deviceBId = `device:${userId}:dev-B`
+    expect(initialResult.groups[0].device.id).toBe(deviceAId)
+    expect(initialResult.groups[1].device.id).toBe(deviceBId)
+
+    // Now send a permission.asked blocker to device B (the lower-ranked device)
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          permissionAskedEvent("44444444-4444-4444-8444-444444444444", {
+            deviceUid: "dev-B",
+            requestId: "perm-device-B",
+            sessionId: "session-B",
+          }),
+        ],
+      },
+    })
+
+    // After blocker: device B should now be ranked first because requires_attention=true
+    const afterBlockerResult = await sessionsOpen({ userId })
+    expect(afterBlockerResult.groups).toHaveLength(2)
+    expect(afterBlockerResult.groups[0].device.id).toBe(deviceBId)
+    expect(afterBlockerResult.groups[0].sessions[0].requires_attention).toBe(true)
+    expect(afterBlockerResult.groups[0].sessions[0].attention_count).toBe(1)
+    expect(afterBlockerResult.groups[1].device.id).toBe(deviceAId)
+    expect(afterBlockerResult.groups[1].sessions[0].requires_attention).toBe(false)
+  })
+
+  it("multiple sessions on lower-ranked device — blocker on any session moves device group to top", async () => {
+    const stores = createOrderingStores()
+    const { ingest, sessionsOpen } = createFullOrderingServices(stores)
+    const userId = "user-e2e-multi"
+
+    // Device A: single active session (starts first due to recency)
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          sessionCreatedEvent("11111111-1111-4111-8111-111111111111", {
+            deviceUid: "dev-A",
+            sessionId: "session-A1",
+            title: "Device A Main Session",
+          }),
+        ],
+      },
+    })
+
+    // Device B: two sessions, both older
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          sessionCreatedEvent("22222222-2222-4222-8222-222222222222", {
+            deviceUid: "dev-B",
+            sessionId: "session-B1",
+            title: "Device B Session 1",
+          }),
+          sessionCreatedEvent("33333333-3333-4333-8333-333333333333", {
+            deviceUid: "dev-B",
+            sessionId: "session-B2",
+            title: "Device B Session 2",
+          }),
+        ],
+      },
+    })
+
+    // Make device B's sessions older
+    for (const sessionId of ["session-B1", "session-B2"]) {
+      const session = stores.sessions.get(sessionId)
+      if (session) {
+        stores.sessions.set(sessionId, {
+          ...session,
+          lastEventAt: new Date("2026-02-22T08:00:00.000Z"),
+        })
+      }
+    }
+
+    // Initial: device A first, device B second
+    const initial = await sessionsOpen({ userId })
+    const deviceAId = `device:${userId}:dev-A`
+    const deviceBId = `device:${userId}:dev-B`
+    expect(initial.groups[0].device.id).toBe(deviceAId)
+    expect(initial.groups[1].device.id).toBe(deviceBId)
+
+    // Blocker on session-B2 (the second session on device B)
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          questionAskedEvent("44444444-4444-4444-8444-444444444444", {
+            deviceUid: "dev-B",
+            requestId: "question-B2",
+            sessionId: "session-B2",
+          }),
+        ],
+      },
+    })
+
+    // Device B should now be first
+    const afterBlocker = await sessionsOpen({ userId })
+    expect(afterBlocker.groups[0].device.id).toBe(deviceBId)
+    // The session with the blocker should be first within device B's group
+    expect(afterBlocker.groups[0].sessions[0].session_id).toBe("session-B2")
+    expect(afterBlocker.groups[0].sessions[0].requires_attention).toBe(true)
+    expect(afterBlocker.groups[1].device.id).toBe(deviceAId)
+  })
+
+  it("resolving the blocker restores original ordering", async () => {
+    const stores = createOrderingStores()
+    const { ingest, sessionsOpen } = createFullOrderingServices(stores)
+    const userId = "user-e2e-restore"
+
+    // Device A: more recent session (starts first)
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          sessionCreatedEvent("11111111-1111-4111-8111-111111111111", {
+            deviceUid: "dev-A",
+            sessionId: "session-A",
+            title: "Device A Session",
+          }),
+        ],
+      },
+    })
+
+    // Device B: older session
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          sessionCreatedEvent("22222222-2222-4222-8222-222222222222", {
+            deviceUid: "dev-B",
+            sessionId: "session-B",
+            title: "Device B Session",
+          }),
+        ],
+      },
+    })
+
+    // Make device B's session older
+    const sessionB = stores.sessions.get("session-B")
+    if (sessionB) {
+      stores.sessions.set("session-B", {
+        ...sessionB,
+        lastEventAt: new Date("2026-02-22T09:00:00.000Z"),
+      })
+    }
+
+    // Add blocker to device B — it moves to top
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          permissionAskedEvent("33333333-3333-4333-8333-333333333333", {
+            deviceUid: "dev-B",
+            requestId: "perm-restore",
+            sessionId: "session-B",
+          }),
+        ],
+      },
+    })
+
+    const deviceAId = `device:${userId}:dev-A`
+    const deviceBId = `device:${userId}:dev-B`
+
+    const withBlocker = await sessionsOpen({ userId })
+    expect(withBlocker.groups[0].device.id).toBe(deviceBId)
+
+    // Resolve the blocker via permission.replied
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          permissionRepliedEvent("44444444-4444-4444-8444-444444444444", {
+            deviceUid: "dev-B",
+            requestId: "perm-restore",
+            sessionId: "session-B",
+            reply: "once",
+          }),
+        ],
+      },
+    })
+
+    // After resolution, device B no longer requires attention
+    // Device A should be ranked first again (more recent lastEventAt)
+    const afterResolved = await sessionsOpen({ userId })
+    expect(afterResolved.groups[0].sessions[0].requires_attention).toBe(false)
+    expect(afterResolved.groups[1].sessions[0].requires_attention).toBe(false)
+    // device A should be first again
+    expect(afterResolved.groups[0].device.id).toBe(deviceAId)
+    expect(afterResolved.groups[1].device.id).toBe(deviceBId)
   })
 })
