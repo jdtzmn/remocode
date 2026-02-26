@@ -15,6 +15,7 @@ import {
 import { ActionSheet } from "../../components/ActionSheet"
 import { DeviceGroupCard } from "../../components/DeviceGroupCard"
 import {
+  ApiError,
   type DeviceGroup,
   type OpenAttentionRequest,
   fetchRequestsOpen,
@@ -25,6 +26,22 @@ import { useAuth } from "../../lib/auth-context"
 import { useAttentionStore } from "../../lib/store"
 import { useRealtime } from "../../lib/use-realtime"
 import { crypto } from "../../lib/uuid"
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function getErrorMessage(err: unknown): string {
+  if (err instanceof ApiError) {
+    const code = (err.body as { error?: { code?: string } })?.error?.code
+    if (code === "PLUGIN_OFFLINE") {
+      return "Device is offline. Reconnect and try again."
+    }
+    return err.message
+  }
+  if (err instanceof Error) {
+    return err.message
+  }
+  return "Failed to send response"
+}
 
 export default function AttentionScreen() {
   const { signOut } = useAuth()
@@ -98,13 +115,7 @@ export default function AttentionScreen() {
         queryClient.invalidateQueries({ queryKey: ["requests", "open"] })
         queryClient.invalidateQueries({ queryKey: ["sessions", "open"] })
       } catch (err) {
-        const message =
-          err instanceof Error && err.message.includes("PLUGIN_OFFLINE")
-            ? "Device is offline. Reconnect and try again."
-            : err instanceof Error
-              ? err.message
-              : "Failed to send response"
-        Alert.alert("Action failed", message)
+        Alert.alert("Action failed", getErrorMessage(err))
       } finally {
         setRequestPending(requestId, false)
       }
@@ -125,13 +136,7 @@ export default function AttentionScreen() {
         queryClient.invalidateQueries({ queryKey: ["requests", "open"] })
         queryClient.invalidateQueries({ queryKey: ["sessions", "open"] })
       } catch (err) {
-        const message =
-          err instanceof Error && err.message.includes("PLUGIN_OFFLINE")
-            ? "Device is offline. Reconnect and try again."
-            : err instanceof Error
-              ? err.message
-              : "Failed to send response"
-        Alert.alert("Action failed", message)
+        Alert.alert("Action failed", getErrorMessage(err))
       } finally {
         setRequestPending(requestId, false)
       }
@@ -152,13 +157,7 @@ export default function AttentionScreen() {
         queryClient.invalidateQueries({ queryKey: ["requests", "open"] })
         queryClient.invalidateQueries({ queryKey: ["sessions", "open"] })
       } catch (err) {
-        const message =
-          err instanceof Error && err.message.includes("PLUGIN_OFFLINE")
-            ? "Device is offline. Reconnect and try again."
-            : err instanceof Error
-              ? err.message
-              : "Failed to send response"
-        Alert.alert("Action failed", message)
+        Alert.alert("Action failed", getErrorMessage(err))
       } finally {
         setRequestPending(requestId, false)
       }

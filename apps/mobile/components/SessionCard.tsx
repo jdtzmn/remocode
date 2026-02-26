@@ -1,7 +1,13 @@
-import { StyleSheet, Text, View } from "react-native"
+import { useEffect, useRef } from "react"
+import { LayoutAnimation, Platform, StyleSheet, Text, UIManager, View } from "react-native"
 import type { OpenAttentionRequest, SessionSummary } from "../lib/api"
 import { useAttentionStore } from "../lib/store"
 import { BlockerCard } from "./BlockerCard"
+
+// Enable LayoutAnimation on Android
+if (Platform.OS === "android" && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true)
+}
 
 interface SessionCardProps {
   session: SessionSummary
@@ -14,6 +20,15 @@ export function SessionCard({ session, requests, onBlockerPress }: SessionCardPr
   const openRequests = requests.filter(
     (r) => r.session_id === session.session_id && r.status === "open",
   )
+
+  // Animate when blocker count changes (insertion/removal)
+  const prevCountRef = useRef(openRequests.length)
+  useEffect(() => {
+    if (openRequests.length !== prevCountRef.current) {
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut)
+      prevCountRef.current = openRequests.length
+    }
+  }, [openRequests.length])
 
   return (
     <View style={[styles.container, session.is_stale && styles.staleContainer]}>

@@ -1,7 +1,21 @@
-import { StyleSheet, Text, TouchableOpacity, View } from "react-native"
+import { useEffect, useRef } from "react"
+import {
+  LayoutAnimation,
+  Platform,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  UIManager,
+  View,
+} from "react-native"
 import type { DeviceGroup, OpenAttentionRequest } from "../lib/api"
 import { useAttentionStore } from "../lib/store"
 import { SessionCard } from "./SessionCard"
+
+// Enable LayoutAnimation on Android
+if (Platform.OS === "android" && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true)
+}
 
 interface DeviceGroupCardProps {
   group: DeviceGroup
@@ -23,6 +37,15 @@ export function DeviceGroupCard({ group, requests, onBlockerPress }: DeviceGroup
 
   // Total attention count across all sessions in group
   const totalAttentionCount = group.sessions.reduce((sum, s) => sum + s.attention_count, 0)
+
+  // Animate when device-level attention count changes
+  const prevAttentionCountRef = useRef(totalAttentionCount)
+  useEffect(() => {
+    if (totalAttentionCount !== prevAttentionCountRef.current) {
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut)
+      prevAttentionCountRef.current = totalAttentionCount
+    }
+  }, [totalAttentionCount])
 
   const deviceName = group.device.name ?? "Unknown Device"
   const platform = group.device.platform ?? ""
