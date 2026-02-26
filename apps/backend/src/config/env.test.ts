@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { loadEnv } from "./env"
+import { loadEnv, requireAuthEnv } from "./env"
 
 describe("loadEnv", () => {
   it("uses defaults when optional values are missing", () => {
@@ -29,5 +29,24 @@ describe("loadEnv", () => {
     expect(env.NODE_ENV).toBe("production")
     expect(env.PORT).toBe(8080)
     expect(env.SUPABASE_AUDIENCE).toBe("authenticated")
+  })
+
+  it("requires auth settings when building auth middleware", () => {
+    expect(() =>
+      requireAuthEnv({
+        SUPABASE_ISSUER: "https://example.supabase.co/auth/v1",
+      }),
+    ).toThrow("Invalid environment configuration")
+  })
+
+  it("accepts complete auth settings", () => {
+    const authEnv = requireAuthEnv({
+      SUPABASE_ISSUER: "https://example.supabase.co/auth/v1",
+      SUPABASE_AUDIENCE: "authenticated",
+      SUPABASE_JWKS_URL: "https://example.supabase.co/auth/v1/.well-known/jwks.json",
+      PAT_HASH_PEPPER: "pepper",
+    })
+
+    expect(authEnv.SUPABASE_AUDIENCE).toBe("authenticated")
   })
 })

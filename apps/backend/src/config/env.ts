@@ -12,6 +12,13 @@ const envSchema = z.object({
   SOCKET_IO_CORS_ORIGIN: z.string().min(1).optional(),
 })
 
+const authEnvSchema = z.object({
+  SUPABASE_ISSUER: z.string().url(),
+  SUPABASE_AUDIENCE: z.string().min(1),
+  SUPABASE_JWKS_URL: z.string().url(),
+  PAT_HASH_PEPPER: z.string().min(1),
+})
+
 function formatZodIssues(issues: z.ZodIssue[]) {
   return issues.map((issue) => {
     const path = issue.path.length > 0 ? issue.path.join(".") : "env"
@@ -30,4 +37,16 @@ export function loadEnv(raw: NodeJS.ProcessEnv = process.env) {
   return result.data
 }
 
+export function requireAuthEnv(raw: Record<string, unknown>) {
+  const result = authEnvSchema.safeParse(raw)
+
+  if (!result.success) {
+    const details = formatZodIssues(result.error.issues).join("; ")
+    throw new Error(`Invalid environment configuration: ${details}`)
+  }
+
+  return result.data
+}
+
 export type AppEnv = z.infer<typeof envSchema>
+export type AuthEnv = z.infer<typeof authEnvSchema>
