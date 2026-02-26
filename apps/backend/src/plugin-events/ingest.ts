@@ -10,6 +10,7 @@ import { z } from "zod"
 import type { AttentionRequestReducer } from "../attention-requests/reducer"
 import { ApiHttpError } from "../http/errors"
 import type { SessionProjectionReducer } from "../session-projections/reducer"
+import type { SocketDeltaEmitter } from "../socket/emitter"
 
 const PluginEventsEnvelopeSchema = z
   .object({
@@ -25,11 +26,30 @@ type PersistInput = {
   event: CanonicalEvent
 }
 
+// Event types that update session_projections and should trigger a sessions.delta emit
+const SESSION_PROJECTION_EVENT_TYPES = new Set([
+  "session.created",
+  "session.updated",
+  "session.deleted",
+  "session.status",
+  "plugin.heartbeat",
+])
+
+// Event types that update attention_requests and should trigger a requests.delta emit
+const ATTENTION_REQUEST_EVENT_TYPES = new Set([
+  "permission.asked",
+  "question.asked",
+  "permission.replied",
+  "question.replied",
+  "question.rejected",
+])
+
 type PersistedEventStore = {
   getOrCreateDeviceId: (args: { userId: string; deviceUid: string }) => Promise<string>
   persistEvent: (input: PersistInput) => Promise<PersistResult>
   projectEvent?: SessionProjectionReducer
   projectAttention?: AttentionRequestReducer
+  socketEmitter?: SocketDeltaEmitter
 }
 
 export type PluginEventsIngestService = (args: {
@@ -108,6 +128,9 @@ export function createPluginEventsIngestService(
           accepted += 1
           const receivedAt = new Date()
 
+          let sessionProjectionUpdated = false
+          let attentionRequestUpdated = false
+
           if (store.projectEvent) {
             await store.projectEvent({
               event,
@@ -115,6 +138,10 @@ export function createPluginEventsIngestService(
               deviceId,
               receivedAt,
             })
+
+            if (SESSION_PROJECTION_EVENT_TYPES.has(event.event_type)) {
+              sessionProjectionUpdated = true
+            }
           }
 
           if (store.projectAttention) {
@@ -124,6 +151,22 @@ export function createPluginEventsIngestService(
               deviceId,
               receivedAt,
             })
+
+            if (ATTENTION_REQUEST_EVENT_TYPES.has(event.event_type)) {
+              attentionRequestUpdated = true
+              // Attention events also update session_projections (attention fields)
+              sessionProjectionUpdated = true
+            }
+          }
+
+          if (store.socketEmitter) {
+            if (sessionProjectionUpdated) {
+              await store.socketEmitter.emitSessionsDelta(userId)
+            }
+
+            if (attentionRequestUpdated) {
+              await store.socketEmitter.emitRequestsDelta(userId)
+            }
           }
         }
       } catch {
