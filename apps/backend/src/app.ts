@@ -3,6 +3,7 @@ import type { MiddlewareHandler } from "hono"
 
 import type { AuthBindings } from "./auth/types"
 import { ApiHttpError, toApiErrorResponse, toApiHttpError } from "./http/errors"
+import { rateLimitMiddleware } from "./http/rate-limit"
 import type { PatCreateService, PatListService, PatRevokeService } from "./pats/service"
 import type { PluginActivityService } from "./plugin-activity/service"
 import type { PluginEventsIngestService } from "./plugin-events/ingest"
@@ -164,39 +165,49 @@ export function createApp(options: CreateAppOptions = {}) {
     return context.json(response)
   })
 
-  app.post("/v1/requests/:requestId/respond", async (context) => {
-    let body: unknown
+  app.post(
+    "/v1/requests/:requestId/respond",
+    // Limit unblock actions: 120 per user per minute
+    rateLimitMiddleware({ max: 120, windowMs: 60_000 }),
+    async (context) => {
+      let body: unknown
 
-    try {
-      body = await context.req.json()
-    } catch {
-      throw new ApiHttpError("INVALID_PAYLOAD")
-    }
+      try {
+        body = await context.req.json()
+      } catch {
+        throw new ApiHttpError("INVALID_PAYLOAD")
+      }
 
-    const auth = context.get("appAuth")
-    const requestId = context.req.param("requestId")
-    const response = await requestsRespond({ userId: auth.userId, requestId, payload: body })
-    return context.json(response)
-  })
+      const auth = context.get("appAuth")
+      const requestId = context.req.param("requestId")
+      const response = await requestsRespond({ userId: auth.userId, requestId, payload: body })
+      return context.json(response)
+    },
+  )
 
   app.use(
     "/v1/pats/*",
     options.appAuthMiddleware ?? rejectWithUnauthorized("App authentication is not configured"),
   )
 
-  app.post("/v1/pats", async (context) => {
-    let body: unknown
+  app.post(
+    "/v1/pats",
+    // Prevent rapid PAT creation: 20 per user per minute
+    rateLimitMiddleware({ max: 20, windowMs: 60_000 }),
+    async (context) => {
+      let body: unknown
 
-    try {
-      body = await context.req.json()
-    } catch {
-      throw new ApiHttpError("INVALID_PAYLOAD")
-    }
+      try {
+        body = await context.req.json()
+      } catch {
+        throw new ApiHttpError("INVALID_PAYLOAD")
+      }
 
-    const auth = context.get("appAuth")
-    const response = await patCreate({ userId: auth.userId, payload: body })
-    return context.json(response, 201)
-  })
+      const auth = context.get("appAuth")
+      const response = await patCreate({ userId: auth.userId, payload: body })
+      return context.json(response, 201)
+    },
+  )
 
   app.get("/v1/pats", async (context) => {
     const auth = context.get("appAuth")
@@ -243,59 +254,85 @@ export function createApp(options: CreateAppOptions = {}) {
       rejectWithUnauthorized("Plugin authentication is not configured"),
   )
 
-  app.post("/v1/plugin/heartbeat", async (context) => {
-    let body: unknown
+  app.post(
+    "/v1/plugin/heartbeat",
+    // Heartbeat sends at most once per 15s, so 120/min is very generous
+    rateLimitMiddleware({ max: 120, windowMs: 60_000 }),
+    async (context) => {
+      let body: unknown
 
-    try {
-      body = await context.req.json()
-    } catch {
-      throw new ApiHttpError("INVALID_PAYLOAD")
-    }
+      try {
+        body = await context.req.json()
+      } catch {
+        throw new ApiHttpError("INVALID_PAYLOAD")
+      }
 
-    context.get("pluginAuth")
-    const auth = context.get("pluginAuth")
-    const response = await pluginHeartbeat({
-      userId: auth.userId,
-      payload: body,
-    })
-    return context.json(response)
-  })
+      const auth = context.get("pluginAuth")
+      const response = await pluginHeartbeat({
+        userId: auth.userId,
+        payload: body,
+      })
+      return context.json(response)
+    },
+  )
 
-  app.post("/v1/plugin/activity", async (context) => {
-    let body: unknown
+  app.post(
+    "/v1/plugin/activity",
+    // Activity samples at most once per 15s, so 120/min is very generous
+    rateLimitMiddleware({ max: 120, windowMs: 60_000 }),
+    async (context) => {
+      let body: unknown
 
-    try {
-      body = await context.req.json()
-    } catch {
-      throw new ApiHttpError("INVALID_PAYLOAD")
-    }
+      try {
+        body = await context.req.json()
+      } catch {
+        throw new ApiHttpError("INVALID_PAYLOAD")
+      }
 
-    const auth = context.get("pluginAuth")
-    const response = await pluginActivity({
-      userId: auth.userId,
-      payload: body,
-    })
+      const auth = context.get("pluginAuth")
+      const response = await pluginActivity({
+        userId: auth.userId,
+        payload: body,
+      })
 
-    return context.json(response)
-  })
+      return context.json(response)
+    },
+  )
 
-  app.post("/v1/plugin/events", async (context) => {
-    let body: unknown
+  app.post(
+    "/v1/plugin/events",
+    // Plugin batches events; 300/min per user allows bursts without abuse
+    rateLimitMiddleware({ max: 300, windowMs: 60_000 }),
+    async (context) => {
+      // Reject oversized payloads (5MB limit) before parsing
+      const contentLength = context.req.header("content-length")
+      if (contentLength !== undefined) {
+        const bytes = Number.parseInt(contentLength, 10)
+        const maxBytes = 5 * 1024 * 1024 // 5 MB
+        if (!Number.isNaN(bytes) && bytes > maxBytes) {
+          throw new ApiHttpError("INVALID_PAYLOAD", {
+            message: "Request body exceeds maximum allowed size",
+          })
+        }
+      }
 
-    try {
-      body = await context.req.json()
-    } catch {
-      throw new ApiHttpError("INVALID_PAYLOAD")
-    }
+      let body: unknown
 
-    const auth = context.get("pluginAuth")
-    const response = await pluginEventsIngest({
-      userId: auth.userId,
-      payload: body,
-    })
+      try {
+        body = await context.req.json()
+      } catch {
+        throw new ApiHttpError("INVALID_PAYLOAD")
+      }
 
-    return context.json(response)
-  })
+      const auth = context.get("pluginAuth")
+      const response = await pluginEventsIngest({
+        userId: auth.userId,
+        payload: body,
+      })
+
+      return context.json(response)
+    },
+  )
 
   return app
 }
