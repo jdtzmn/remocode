@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest"
 
 import { createNotificationEngine } from "./engine"
 import type { NotificationEngineStore, NotificationTrigger } from "./engine"
+import type { PushSender } from "./push-sender"
 
 function makeTrigger(overrides: Partial<NotificationTrigger> = {}): NotificationTrigger {
   return {
@@ -12,6 +13,13 @@ function makeTrigger(overrides: Partial<NotificationTrigger> = {}): Notification
     kind: "permission",
     sessionTitle: "Refactor auth",
     deviceName: "MacBook Pro",
+    ...overrides,
+  }
+}
+
+function makePushSender(overrides: Partial<PushSender> = {}): PushSender {
+  return {
+    sendToUser: vi.fn().mockResolvedValue({ sent: 1, failed: 0 }),
     ...overrides,
   }
 }
@@ -155,5 +163,67 @@ describe("createNotificationEngine", () => {
       title: "Action needed",
       body: "Permission request",
     })
+  })
+
+  it("calls pushSender.sendToUser when decision is send", async () => {
+    const pushSender = makePushSender()
+    const store = makeStore({
+      getDeviceActivity: vi.fn().mockResolvedValue(null), // no sample -> send
+      pushSender,
+    })
+
+    const engine = createNotificationEngine(store)
+    const result = await engine.handleBlocker(makeTrigger())
+
+    expect(result.decision).toBe("send")
+    expect(pushSender.sendToUser).toHaveBeenCalledOnce()
+    expect(pushSender.sendToUser).toHaveBeenCalledWith(
+      "user-1",
+      expect.objectContaining({
+        title: "Action needed: Refactor auth",
+        body: "Permission request on MacBook Pro",
+        data: expect.objectContaining({ request_id: "req-1", kind: "permission" }),
+      }),
+    )
+  })
+
+  it("does not call pushSender when decision is suppress", async () => {
+    const pushSender = makePushSender()
+    const store = makeStore({
+      getDeviceActivity: vi.fn().mockResolvedValue({
+        isActive: true,
+        idleSeconds: 5,
+        sampledAt: new Date(),
+      }),
+      pushSender,
+    })
+
+    const engine = createNotificationEngine(store)
+    const result = await engine.handleBlocker(makeTrigger())
+
+    expect(result.decision).toBe("suppress")
+    expect(pushSender.sendToUser).not.toHaveBeenCalled()
+  })
+
+  it("does not throw when pushSender.sendToUser fails", async () => {
+    const pushSender = makePushSender({
+      sendToUser: vi.fn().mockRejectedValue(new Error("Push API error")),
+    })
+    const store = makeStore({
+      getDeviceActivity: vi.fn().mockResolvedValue(null), // no sample -> send
+      pushSender,
+    })
+
+    const engine = createNotificationEngine(store)
+    await expect(engine.handleBlocker(makeTrigger())).resolves.toBeDefined()
+  })
+
+  it("does not call pushSender when store.pushSender is not set", async () => {
+    // Store without pushSender field
+    const store = makeStore()
+    const engine = createNotificationEngine(store)
+
+    // Should resolve normally without any push sender
+    await expect(engine.handleBlocker(makeTrigger())).resolves.toMatchObject({ decision: "send" })
   })
 })

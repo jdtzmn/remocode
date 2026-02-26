@@ -1,8 +1,42 @@
-import { eq } from "drizzle-orm"
+import { and, eq, isNull } from "drizzle-orm"
 
+import { loadEnv } from "../config/env"
 import { db } from "../db"
-import { deviceActivity, devices, notificationLog, sessionProjections } from "../db/schema"
+import {
+  deviceActivity,
+  devices,
+  mobilePushTokens,
+  notificationLog,
+  sessionProjections,
+} from "../db/schema"
 import { createNotificationEngine } from "./engine"
+import { createExpoPushSender } from "./push-sender"
+
+const env = loadEnv()
+
+const runtimePushSender = createExpoPushSender(
+  {
+    getActiveTokensForUser: async (userId) => {
+      const rows = await db
+        .select({
+          id: mobilePushTokens.id,
+          expoPushToken: mobilePushTokens.expoPushToken,
+        })
+        .from(mobilePushTokens)
+        .where(and(eq(mobilePushTokens.userId, userId), isNull(mobilePushTokens.revokedAt)))
+
+      return rows
+    },
+
+    revokeToken: async (tokenId) => {
+      await db
+        .update(mobilePushTokens)
+        .set({ revokedAt: new Date() })
+        .where(eq(mobilePushTokens.id, tokenId))
+    },
+  },
+  env.EXPO_ACCESS_TOKEN,
+)
 
 export const runtimeNotificationEngine = createNotificationEngine({
   getDeviceActivity: async (deviceId) => {
@@ -37,6 +71,8 @@ export const runtimeNotificationEngine = createNotificationEngine({
       createdAt: new Date(),
     })
   },
+
+  pushSender: runtimePushSender,
 })
 
 /**

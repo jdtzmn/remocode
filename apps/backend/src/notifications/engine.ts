@@ -5,11 +5,10 @@
  * - Fetching latest device activity for the source device
  * - Applying suppression decision matrix
  * - Writing notification_log row (sent | suppressed)
- *
- * Push send itself (Expo API call) is handled by a separate sender layer (TAS-45).
- * This module exposes a `NotificationEngine` interface that the ingest pipeline uses.
+ * - Dispatching push notifications via the push sender when decision is "send"
  */
 
+import type { PushSender } from "./push-sender"
 import type { ActivitySample, SuppressionDecision } from "./suppression"
 import { decideSuppression } from "./suppression"
 
@@ -37,6 +36,8 @@ export type NotificationLogEntry = {
 export type NotificationEngineStore = {
   getDeviceActivity: (deviceId: string) => Promise<ActivitySample | null>
   logNotification: (entry: NotificationLogEntry) => Promise<void>
+  /** Optional push sender — if omitted, no push is sent (useful for testing). */
+  pushSender?: PushSender
 }
 
 export type NotificationEngine = {
@@ -75,6 +76,19 @@ export function createNotificationEngine(store: NotificationEngineStore): Notifi
         })
       } catch {
         // Log failure is non-fatal — decision still stands.
+      }
+
+      // Send push notification when decision is "send"
+      if (decision.decision === "send" && store.pushSender) {
+        try {
+          await store.pushSender.sendToUser(trigger.userId, {
+            title: notificationPayload.title as string,
+            body: notificationPayload.body as string,
+            data: (notificationPayload.data ?? {}) as Record<string, unknown>,
+          })
+        } catch {
+          // Push send failure is non-fatal — logged decision still stands.
+        }
       }
 
       return decision
