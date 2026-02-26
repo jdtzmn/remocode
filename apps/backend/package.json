@@ -6,7 +6,9 @@
   "scripts": {
     "start": "bun run src/server.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:check": "drizzle-kit check"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.4",

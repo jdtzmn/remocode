@@ -34,3 +34,12 @@ jobs:
 
       - name: Run quality checks
         run: bun run ci
+
+      - name: Check Drizzle migrations are up-to-date
+        working-directory: apps/backend
+        env:
+          DATABASE_URL: postgresql://localhost/ci_check
+        run: |
+          bunx drizzle-kit generate
+          cd ../..
+          git diff --exit-code apps/backend/drizzle/ || { echo "ERROR: Schema changes detected without updated migrations. Run 'bun run db:generate' in apps/backend and commit the result."; exit 1; }
