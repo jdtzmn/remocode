@@ -2,6 +2,7 @@ import {
   ApiErrorSchema,
   PatCreateResponseSchema,
   PatListResponseSchema,
+  PushTokenRegisterResponseSchema,
   RequestRespondAcceptedSchema,
   RequestsOpenResponseSchema,
   SessionsOpenResponseSchema,
@@ -23,6 +24,12 @@ import {
 import { createPluginActivityService } from "./plugin-activity/service"
 import type { PluginEventsIngestService } from "./plugin-events/ingest"
 import { createPluginHeartbeatService } from "./plugin-heartbeat/service"
+import {
+  type PushTokenDeleteService,
+  type PushTokenRegisterService,
+  createPushTokenDeleteService,
+  createPushTokenRegisterService,
+} from "./push-tokens/service"
 import type { RequestRespondService } from "./requests/respond-service"
 import { createRequestsOpenService } from "./requests/service"
 import { createSessionsOpenService } from "./sessions/service"
@@ -43,6 +50,8 @@ function createProtectedApp(
     patCreate?: ReturnType<typeof createPatCreateService>
     patList?: ReturnType<typeof createPatListService>
     patRevoke?: ReturnType<typeof createPatRevokeService>
+    pushTokenRegister?: PushTokenRegisterService
+    pushTokenDelete?: PushTokenDeleteService
   } = {},
 ) {
   return createApp({
@@ -149,6 +158,40 @@ function createProtectedApp(
           createdAt: new Date(),
           lastUsedAt: null,
           revokedAt: new Date(),
+        }),
+      }),
+    pushTokenRegister:
+      options.pushTokenRegister ??
+      createPushTokenRegisterService({
+        upsertPushToken: async ({ userId, expoPushToken, platform, deviceName, appVersion }) => ({
+          id: "push-token-stub-1",
+          userId,
+          expoPushToken,
+          platform,
+          deviceName,
+          appVersion,
+          lastSeenAt: new Date(),
+          revokedAt: null,
+          createdAt: new Date("2026-02-22T09:00:00.000Z"),
+        }),
+        deletePushToken: async () => null,
+      }),
+    pushTokenDelete:
+      options.pushTokenDelete ??
+      createPushTokenDeleteService({
+        upsertPushToken: async () => {
+          throw new Error("not used")
+        },
+        deletePushToken: async () => ({
+          id: "push-token-stub-1",
+          userId: "user-1",
+          expoPushToken: "ExponentPushToken[xxx]",
+          platform: "ios" as const,
+          deviceName: null,
+          appVersion: null,
+          lastSeenAt: new Date(),
+          revokedAt: new Date(),
+          createdAt: new Date(),
         }),
       }),
   })
@@ -757,5 +800,94 @@ describe("createApp", () => {
     expect(createRes.status).toBe(401)
     expect(listRes.status).toBe(401)
     expect(revokeRes.status).toBe(401)
+  })
+
+  it("registers a push token and returns 201 with token data", async () => {
+    const app = createProtectedApp()
+
+    const response = await app.request("/v1/push-tokens", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${validJwt}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        expo_push_token: "ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]",
+        platform: "ios",
+        device_name: "iPhone 15",
+        app_version: "1.0.0",
+      }),
+    })
+    const body = await response.json()
+
+    expect(response.status).toBe(201)
+    expect(PushTokenRegisterResponseSchema.safeParse(body).success).toBe(true)
+    expect(body.expo_push_token).toBe("ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]")
+    expect(body.platform).toBe("ios")
+  })
+
+  it("returns INVALID_PAYLOAD when registering push token without expo_push_token", async () => {
+    const app = createProtectedApp()
+
+    const response = await app.request("/v1/push-tokens", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${validJwt}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ platform: "ios" }),
+    })
+    const body = await response.json()
+
+    expect(response.status).toBe(400)
+    expect(body).toMatchObject({ error: { code: "INVALID_PAYLOAD" } })
+  })
+
+  it("deletes a push token and returns ok", async () => {
+    const app = createProtectedApp()
+
+    const response = await app.request("/v1/push-tokens/push-token-1", {
+      method: "DELETE",
+      headers: {
+        authorization: `Bearer ${validJwt}`,
+      },
+    })
+    const body = await response.json()
+
+    expect(response.status).toBe(200)
+    expect(body).toEqual({ ok: true })
+  })
+
+  it("returns REQUEST_NOT_FOUND when deleting a non-existent push token", async () => {
+    const app = createProtectedApp({
+      pushTokenDelete: async () => {
+        throw new ApiHttpError("REQUEST_NOT_FOUND")
+      },
+    })
+
+    const response = await app.request("/v1/push-tokens/nonexistent", {
+      method: "DELETE",
+      headers: {
+        authorization: `Bearer ${validJwt}`,
+      },
+    })
+    const body = await response.json()
+
+    expect(response.status).toBe(404)
+    expect(body).toMatchObject({ error: { code: "REQUEST_NOT_FOUND" } })
+  })
+
+  it("rejects push token endpoints without auth", async () => {
+    const app = createProtectedApp()
+
+    const registerRes = await app.request("/v1/push-tokens", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expo_push_token: "ExponentPushToken[xxx]", platform: "ios" }),
+    })
+    const deleteRes = await app.request("/v1/push-tokens/token-1", { method: "DELETE" })
+
+    expect(registerRes.status).toBe(401)
+    expect(deleteRes.status).toBe(401)
   })
 })

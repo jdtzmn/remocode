@@ -15,6 +15,10 @@ import {
 import { runtimePluginActivityService } from "./plugin-activity/runtime"
 import { createRuntimePluginEventsIngestService } from "./plugin-events/runtime"
 import { runtimePluginHeartbeatService } from "./plugin-heartbeat/runtime"
+import {
+  runtimePushTokenDeleteService,
+  runtimePushTokenRegisterService,
+} from "./push-tokens/runtime"
 import { createRuntimeRequestRespondService } from "./requests/respond-runtime"
 import { runtimeRequestsOpenService } from "./requests/runtime"
 import { runtimeStaleEvaluatorJob } from "./session-projections/stale-evaluator-runtime"
@@ -48,6 +52,8 @@ const app = createApp({
   patCreate: createRuntimePatCreateService(authEnv.PAT_HASH_PEPPER),
   patList: runtimePatListService,
   patRevoke: runtimePatRevokeService,
+  pushTokenRegister: runtimePushTokenRegisterService,
+  pushTokenDelete: runtimePushTokenDeleteService,
 })
 
 const httpServer = serve({

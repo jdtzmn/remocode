@@ -7,6 +7,7 @@ import type { PatCreateService, PatListService, PatRevokeService } from "./pats/
 import type { PluginActivityService } from "./plugin-activity/service"
 import type { PluginEventsIngestService } from "./plugin-events/ingest"
 import type { PluginHeartbeatService } from "./plugin-heartbeat/service"
+import type { PushTokenDeleteService, PushTokenRegisterService } from "./push-tokens/service"
 import type { RequestRespondService } from "./requests/respond-service"
 import type { RequestsOpenService } from "./requests/service"
 import type { SessionsOpenService } from "./sessions/service"
@@ -23,6 +24,8 @@ type CreateAppOptions = {
   patCreate?: PatCreateService
   patList?: PatListService
   patRevoke?: PatRevokeService
+  pushTokenRegister?: PushTokenRegisterService
+  pushTokenDelete?: PushTokenDeleteService
 }
 
 function rejectWithUnauthorized(message: string): MiddlewareHandler<AuthBindings> {
@@ -103,6 +106,22 @@ export function createApp(options: CreateAppOptions = {}) {
     (async () => {
       throw new ApiHttpError("INTERNAL_ERROR", {
         message: "PAT revoke service is not configured",
+      })
+    })
+
+  const pushTokenRegister =
+    options.pushTokenRegister ??
+    (async () => {
+      throw new ApiHttpError("INTERNAL_ERROR", {
+        message: "Push token register service is not configured",
+      })
+    })
+
+  const pushTokenDelete =
+    options.pushTokenDelete ??
+    (async () => {
+      throw new ApiHttpError("INTERNAL_ERROR", {
+        message: "Push token delete service is not configured",
       })
     })
 
@@ -189,6 +208,32 @@ export function createApp(options: CreateAppOptions = {}) {
     const auth = context.get("appAuth")
     const patId = context.req.param("patId")
     const response = await patRevoke({ userId: auth.userId, patId })
+    return context.json(response)
+  })
+
+  app.use(
+    "/v1/push-tokens/*",
+    options.appAuthMiddleware ?? rejectWithUnauthorized("App authentication is not configured"),
+  )
+
+  app.post("/v1/push-tokens", async (context) => {
+    let body: unknown
+
+    try {
+      body = await context.req.json()
+    } catch {
+      throw new ApiHttpError("INVALID_PAYLOAD")
+    }
+
+    const auth = context.get("appAuth")
+    const response = await pushTokenRegister({ userId: auth.userId, payload: body })
+    return context.json(response, 201)
+  })
+
+  app.delete("/v1/push-tokens/:tokenId", async (context) => {
+    const auth = context.get("appAuth")
+    const pushTokenId = context.req.param("tokenId")
+    const response = await pushTokenDelete({ userId: auth.userId, pushTokenId })
     return context.json(response)
   })
 

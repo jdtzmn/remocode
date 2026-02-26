@@ -447,6 +447,17 @@ export const PushTokenRegisterRequestSchema = z
   })
   .strict()
 
+export const PushTokenRegisterResponseSchema = z
+  .object({
+    id: z.string().min(1),
+    expo_push_token: z.string().min(1),
+    platform: PushTokenPlatformSchema,
+    device_name: z.string().min(1).nullable(),
+    app_version: z.string().min(1).nullable(),
+    created_at: IsoDateTimeSchema,
+  })
+  .strict()
+
 export const PatCreateRequestSchema = z
   .object({
     label: z.string().min(1).max(120),
@@ -631,6 +642,7 @@ export type RequestRespondAccepted = z.infer<typeof RequestRespondAcceptedSchema
 // Push token types
 export type PushTokenPlatform = z.infer<typeof PushTokenPlatformSchema>
 export type PushTokenRegisterRequest = z.infer<typeof PushTokenRegisterRequestSchema>
+export type PushTokenRegisterResponse = z.infer<typeof PushTokenRegisterResponseSchema>
 
 // PAT types
 export type PatCreateRequest = z.infer<typeof PatCreateRequestSchema>
