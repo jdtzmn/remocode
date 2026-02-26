@@ -230,6 +230,23 @@ describe("createApp", () => {
     await expect(response.json()).resolves.toEqual({ ok: true })
   })
 
+  it("returns metrics snapshot from /metrics endpoint", async () => {
+    const app = createApp()
+    const response = await app.request("/metrics")
+
+    expect(response.status).toBe(200)
+    const body = await response.json()
+    // Snapshot must include all required metric keys
+    expect(body).toHaveProperty("events_ingested_total")
+    expect(body).toHaveProperty("events_deduped_total")
+    expect(body).toHaveProperty("projection_update_duration_ms")
+    expect(body).toHaveProperty("socket_connected_users")
+    expect(body).toHaveProperty("socket_connected_devices")
+    expect(body).toHaveProperty("relay_total")
+    expect(body).toHaveProperty("notifications_total")
+    expect(body).toHaveProperty("fetch_duration_ms")
+  })
+
   it("returns not found for unknown routes", async () => {
     const app = createApp()
     const response = await app.request("/does-not-exist")

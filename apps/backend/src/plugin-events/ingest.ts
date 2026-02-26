@@ -10,6 +10,7 @@ import { z } from "zod"
 import type { AttentionRequestReducer } from "../attention-requests/reducer"
 import { ApiHttpError } from "../http/errors"
 import { logger } from "../logger"
+import { globalMetrics } from "../metrics"
 import type { NotificationEngine } from "../notifications/engine"
 import type { SessionProjectionReducer } from "../session-projections/reducer"
 import type { SocketDeltaEmitter } from "../socket/emitter"
@@ -153,9 +154,11 @@ export function createPluginEventsIngestService(
 
         if (persistResult === "deduped") {
           deduped += 1
+          globalMetrics.recordEventDeduped()
           eventWithDeviceLog.debug("event deduped")
         } else {
           accepted += 1
+          globalMetrics.recordEventIngested(event.event_type)
           eventWithDeviceLog.info("event accepted")
           const receivedAt = new Date()
 
@@ -163,12 +166,14 @@ export function createPluginEventsIngestService(
           let attentionRequestUpdated = false
 
           if (store.projectEvent) {
+            const t0 = Date.now()
             await store.projectEvent({
               event,
               userId,
               deviceId,
               receivedAt,
             })
+            globalMetrics.recordProjectionUpdate("session", Date.now() - t0)
 
             if (SESSION_PROJECTION_EVENT_TYPES.has(event.event_type)) {
               sessionProjectionUpdated = true
@@ -176,12 +181,14 @@ export function createPluginEventsIngestService(
           }
 
           if (store.projectAttention) {
+            const t0 = Date.now()
             await store.projectAttention({
               event,
               userId,
               deviceId,
               receivedAt,
             })
+            globalMetrics.recordProjectionUpdate("attention", Date.now() - t0)
 
             if (ATTENTION_REQUEST_EVENT_TYPES.has(event.event_type)) {
               attentionRequestUpdated = true

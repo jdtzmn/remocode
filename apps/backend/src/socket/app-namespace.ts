@@ -2,6 +2,7 @@ import type { Server } from "socket.io"
 
 import type { SupabaseJwtVerifier } from "../auth/supabase"
 import { logger } from "../logger"
+import { globalMetrics } from "../metrics"
 import type {
   AppClientToServerEvents,
   AppInterServerEvents,
@@ -55,9 +56,11 @@ export function configureAppNamespace(
   appNs.on("connection", (socket) => {
     const userId = socket.data.userId
     void socket.join(`user:${userId}`)
+    globalMetrics.setSocketConnectedUsers(appNs.sockets.size)
     appNsLog.info("app socket connected", { user_id: userId, socket_id: socket.id })
 
     socket.on("disconnect", (reason) => {
+      globalMetrics.setSocketConnectedUsers(appNs.sockets.size - 1)
       appNsLog.info("app socket disconnected", {
         user_id: userId,
         socket_id: socket.id,

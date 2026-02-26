@@ -2,6 +2,7 @@ import type { Server } from "socket.io"
 
 import type { PatAuthenticator } from "../auth/pat"
 import { logger } from "../logger"
+import { globalMetrics } from "../metrics"
 import type {
   PluginClientToServerEvents,
   PluginInterServerEvents,
@@ -76,6 +77,7 @@ export function configurePluginNamespace(
     const deviceId = socket.data.deviceId
     const userId = socket.data.userId
     void socket.join(`device:${deviceId}`)
+    globalMetrics.setSocketConnectedDevices(pluginNs.sockets.size)
     pluginNsLog.info("plugin socket connected", {
       user_id: userId,
       device_id: deviceId,
@@ -83,6 +85,7 @@ export function configurePluginNamespace(
     })
 
     socket.on("disconnect", (reason) => {
+      globalMetrics.setSocketConnectedDevices(pluginNs.sockets.size - 1)
       pluginNsLog.info("plugin socket disconnected", {
         user_id: userId,
         device_id: deviceId,

@@ -3,6 +3,7 @@ import type { z } from "zod"
 
 import { type ApiErrorCode, ApiHttpError } from "../http/errors"
 import { logger } from "../logger"
+import { globalMetrics } from "../metrics"
 import type { SocketDeltaEmitter } from "../socket/emitter"
 import type { PluginAckEnvelope, PluginCommandEnvelope } from "../socket/types"
 
@@ -138,6 +139,13 @@ export function createRequestRespondService(
       // relay threw - could be PLUGIN_OFFLINE or RELAY_TIMEOUT
       if (err instanceof ApiHttpError) {
         commandLog.warn("relay failed", { error_code: err.code })
+        const relayResult =
+          err.code === "PLUGIN_OFFLINE"
+            ? "offline"
+            : err.code === "RELAY_TIMEOUT"
+              ? "timeout"
+              : "error"
+        globalMetrics.recordRelay(relayResult)
         await store.saveActionAttempt({
           userId,
           clientActionId,
@@ -150,6 +158,7 @@ export function createRequestRespondService(
         throw err
       }
       commandLog.error("relay threw unexpected error")
+      globalMetrics.recordRelay("error")
       await store.saveActionAttempt({
         userId,
         clientActionId,
@@ -165,6 +174,7 @@ export function createRequestRespondService(
     if (!ack.accepted) {
       const errorCode = ack.error ?? "RELAY_EXECUTION_FAILED"
       commandLog.warn("relay ack rejected", { error_code: errorCode })
+      globalMetrics.recordRelay("execution_failed")
       await store.saveActionAttempt({
         userId,
         clientActionId,
@@ -178,6 +188,7 @@ export function createRequestRespondService(
     }
 
     commandLog.info("relay accepted by plugin")
+    globalMetrics.recordRelay("success")
 
     const successResult: RequestRespondAccepted = {
       status: "accepted",

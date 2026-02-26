@@ -9,6 +9,7 @@
  */
 
 import { logger } from "../logger"
+import { globalMetrics } from "../metrics"
 import type { PushSender } from "./push-sender"
 import type { ActivitySample, SuppressionDecision } from "./suppression"
 import { decideSuppression } from "./suppression"
@@ -95,6 +96,8 @@ export function createNotificationEngine(store: NotificationEngineStore): Notifi
         notification_decision: decision.decision,
         reason: decision.reason,
       })
+
+      globalMetrics.recordNotification(decision.decision === "suppress" ? "suppressed" : "sent")
 
       const notificationPayload = buildNotificationPayload(trigger)
 

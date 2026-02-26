@@ -4,6 +4,7 @@ import type { MiddlewareHandler } from "hono"
 import type { AuthBindings } from "./auth/types"
 import { ApiHttpError, toApiErrorResponse, toApiHttpError } from "./http/errors"
 import { rateLimitMiddleware } from "./http/rate-limit"
+import { globalMetrics } from "./metrics"
 import type { PatCreateService, PatListService, PatRevokeService } from "./pats/service"
 import type { PluginActivityService } from "./plugin-activity/service"
 import type { PluginEventsIngestService } from "./plugin-events/ingest"
@@ -143,6 +144,10 @@ export function createApp(options: CreateAppOptions = {}) {
     return context.json({ ok: true })
   })
 
+  app.get("/metrics", (context) => {
+    return context.json(globalMetrics.snapshot())
+  })
+
   app.use(
     "/v1/sessions/*",
     options.appAuthMiddleware ?? rejectWithUnauthorized("App authentication is not configured"),
@@ -150,7 +155,9 @@ export function createApp(options: CreateAppOptions = {}) {
 
   app.get("/v1/sessions/open", async (context) => {
     const auth = context.get("appAuth")
+    const t0 = Date.now()
     const response = await sessionsOpen({ userId: auth.userId })
+    globalMetrics.recordFetchDuration("sessions.open", Date.now() - t0)
     return context.json(response)
   })
 
@@ -161,7 +168,9 @@ export function createApp(options: CreateAppOptions = {}) {
 
   app.get("/v1/requests/open", async (context) => {
     const auth = context.get("appAuth")
+    const t0 = Date.now()
     const response = await requestsOpen({ userId: auth.userId })
+    globalMetrics.recordFetchDuration("requests.open", Date.now() - t0)
     return context.json(response)
   })
 
