@@ -2,6 +2,7 @@ import { type RequestRespondAccepted, RequestRespondRequestSchema } from "@remoc
 import type { z } from "zod"
 
 import { type ApiErrorCode, ApiHttpError } from "../http/errors"
+import type { SocketDeltaEmitter } from "../socket/emitter"
 import type { PluginAckEnvelope, PluginCommandEnvelope } from "../socket/types"
 
 export type AttentionRequestRow = {
@@ -54,6 +55,7 @@ export type RequestRespondService = (args: {
 export function createRequestRespondService(
   store: RequestRespondStore,
   relay: PluginRelayFn,
+  socketEmitter?: SocketDeltaEmitter,
 ): RequestRespondService {
   return async ({ userId, requestId, payload }) => {
     // Parse and validate the request body
@@ -128,6 +130,7 @@ export function createRequestRespondService(
           errorCode: err.code,
           result: { error_code: err.code },
         })
+        await socketEmitter?.emitRequestFailed(userId, requestId, err.code, err.message)
         throw err
       }
       await store.saveActionAttempt({
@@ -138,6 +141,7 @@ export function createRequestRespondService(
         errorCode: "INTERNAL_ERROR",
         result: { error_code: "INTERNAL_ERROR" },
       })
+      await socketEmitter?.emitRequestFailed(userId, requestId, "INTERNAL_ERROR", "Internal error")
       throw new ApiHttpError("INTERNAL_ERROR")
     }
 
@@ -151,6 +155,7 @@ export function createRequestRespondService(
         errorCode,
         result: { error_code: errorCode },
       })
+      await socketEmitter?.emitRequestFailed(userId, requestId, errorCode, "Relay execution failed")
       throw new ApiHttpError("RELAY_EXECUTION_FAILED")
     }
 

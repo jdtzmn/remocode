@@ -39,7 +39,7 @@ const app = createApp({
   pluginEventsIngest: createRuntimePluginEventsIngestService(socketEmitter),
   sessionsOpen: runtimeSessionsOpenService,
   requestsOpen: runtimeRequestsOpenService,
-  requestsRespond: createRuntimeRequestRespondService(io),
+  requestsRespond: createRuntimeRequestRespondService(io, socketEmitter),
 })
 
 const httpServer = serve({

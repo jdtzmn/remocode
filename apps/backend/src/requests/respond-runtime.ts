@@ -4,6 +4,7 @@ import type { Server } from "socket.io"
 import { db } from "../db"
 import { actionAttempts, attentionRequests } from "../db/schema"
 import { ApiHttpError } from "../http/errors"
+import type { SocketDeltaEmitter } from "../socket/emitter"
 import type { PluginAckEnvelope, PluginCommandEnvelope } from "../socket/types"
 import { createRequestRespondService } from "./respond-service"
 
@@ -71,7 +72,7 @@ export function createPluginRelay(io: Server) {
   }
 }
 
-export function createRuntimeRequestRespondService(io: Server) {
+export function createRuntimeRequestRespondService(io: Server, socketEmitter?: SocketDeltaEmitter) {
   const relay = createPluginRelay(io)
 
   return createRequestRespondService(
@@ -145,5 +146,6 @@ export function createRuntimeRequestRespondService(io: Server) {
       },
     },
     relay,
+    socketEmitter,
   )
 }

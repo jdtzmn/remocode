@@ -44,6 +44,13 @@ const ATTENTION_REQUEST_EVENT_TYPES = new Set([
   "question.rejected",
 ])
 
+// Event types that close attention requests and should trigger a request.resolved emit
+const ATTENTION_CLOSE_EVENT_TYPES = new Set([
+  "permission.replied",
+  "question.replied",
+  "question.rejected",
+])
+
 type PersistedEventStore = {
   getOrCreateDeviceId: (args: { userId: string; deviceUid: string }) => Promise<string>
   persistEvent: (input: PersistInput) => Promise<PersistResult>
@@ -166,6 +173,14 @@ export function createPluginEventsIngestService(
 
             if (attentionRequestUpdated) {
               await store.socketEmitter.emitRequestsDelta(userId)
+
+              // Emit request.resolved when a request is closed by a reply/rejected event
+              if (ATTENTION_CLOSE_EVENT_TYPES.has(event.event_type)) {
+                const requestId = (event.payload as { requestID?: string }).requestID
+                if (requestId) {
+                  await store.socketEmitter.emitRequestResolved(userId, requestId)
+                }
+              }
             }
           }
         }

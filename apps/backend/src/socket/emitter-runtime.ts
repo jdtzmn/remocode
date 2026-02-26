@@ -27,5 +27,13 @@ export function createRuntimeSocketDeltaEmitter(
       const data = await services.requestsOpen({ userId })
       appNs.to(`user:${userId}`).emit("requests.delta", data)
     },
+
+    emitRequestResolved: async (userId: string, requestId: string) => {
+      appNs.to(`user:${userId}`).emit("request.resolved", { request_id: requestId })
+    },
+
+    emitRequestFailed: async (userId: string, requestId: string, code: string, message: string) => {
+      appNs.to(`user:${userId}`).emit("request.failed", { request_id: requestId, code, message })
+    },
   }
 }
