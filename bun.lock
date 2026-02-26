@@ -53,6 +53,21 @@
         "typescript": "^5.9.3",
       },
     },
+    "packages/opencode-plugin": {
+      "name": "@remocode/opencode-plugin",
+      "version": "0.1.0",
+      "dependencies": {
+        "@opencode-ai/plugin": "^1.2.14",
+        "@remocode/contracts": "workspace:*",
+        "socket.io-client": "^4.8.3",
+        "zod": "^3.25.76",
+      },
+      "devDependencies": {
+        "@types/node": "^24.3.0",
+        "typescript": "^5.9.3",
+        "vitest": "^3.2.4",
+      },
+    },
   },
   "packages": {
     "@0no-co/graphql.web": ["@0no-co/graphql.web@1.2.0", "", { "peerDependencies": { "graphql": "^14.0.0 || ^15.0.0 || ^16.0.0" }, "optionalPeers": ["graphql"] }, "sha512-/1iHy9TTr63gE1YcR5idjx8UREz1s0kFhydf3bBLCXyqjhkIc6igAzTOx3zPifCwFR87tsh/4Pa9cNts6d2otw=="],
@@ -401,6 +416,10 @@
 
     "@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.31", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.1.0", "@jridgewell/sourcemap-codec": "^1.4.14" } }, "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw=="],
 
+    "@opencode-ai/plugin": ["@opencode-ai/plugin@1.2.14", "", { "dependencies": { "@opencode-ai/sdk": "1.2.14", "zod": "4.1.8" } }, "sha512-36dPaIaNPMjA5jnFAbOzvKe78dbUkKXF8hgs8PNRXiAaTSzoIapBC/xkADVRO66tmLyZhoGFSBkVeJUpOyyiew=="],
+
+    "@opencode-ai/sdk": ["@opencode-ai/sdk@1.2.14", "", {}, "sha512-nPkWAmzgPJYyfCJAV4NG7HTfN/iuO3B6fv8sT26NhPiR+EqD9i8sh4X1LwI7wEbbMOwWOX1PhrssW6gXQOOQZQ=="],
+
     "@react-native/assets-registry": ["@react-native/assets-registry@0.81.5", "", {}, "sha512-705B6x/5Kxm1RKRvSv0ADYWm5JOnoiQ1ufW7h8uu2E6G9Of/eE6hP/Ivw3U5jI16ERqZxiKQwk34VJbB0niX9w=="],
 
     "@react-native/babel-plugin-codegen": ["@react-native/babel-plugin-codegen@0.81.5", "", { "dependencies": { "@babel/traverse": "^7.25.3", "@react-native/codegen": "0.81.5" } }, "sha512-oF71cIH6je3fSLi6VPjjC3Sgyyn57JLHXs+mHWc9MoCiJJcM4nqsS5J38zv1XQ8d3zOW2JtHro+LF0tagj2bfQ=="],
@@ -426,6 +445,8 @@
     "@remocode/backend": ["@remocode/backend@workspace:apps/backend"],
 
     "@remocode/contracts": ["@remocode/contracts@workspace:packages/contracts"],
+
+    "@remocode/opencode-plugin": ["@remocode/opencode-plugin@workspace:packages/opencode-plugin"],
 
     "@rollup/rollup-android-arm-eabi": ["@rollup/rollup-android-arm-eabi@4.59.0", "", { "os": "android", "cpu": "arm" }, "sha512-upnNBkA6ZH2VKGcBj9Fyl9IGNPULcjXRlg0LLeaioQWueH30p6IXtJEbKAgvyv+mJaMxSm1l6xwDXYjpEMiLMg=="],
 
@@ -1414,6 +1435,8 @@
     "@jest/fake-timers/@types/node": ["@types/node@25.3.0", "", { "dependencies": { "undici-types": "~7.18.0" } }, "sha512-4K3bqJpXpqfg2XKGK9bpDTc6xO/xoUP/RBWS7AtRMug6zZFaRekiLzjVtAoZMquxoAbzBvy5nxQ7veS5eYzf8A=="],
 
     "@jest/types/@types/node": ["@types/node@25.3.0", "", { "dependencies": { "undici-types": "~7.18.0" } }, "sha512-4K3bqJpXpqfg2XKGK9bpDTc6xO/xoUP/RBWS7AtRMug6zZFaRekiLzjVtAoZMquxoAbzBvy5nxQ7veS5eYzf8A=="],
+
+    "@opencode-ai/plugin/zod": ["zod@4.1.8", "", {}, "sha512-5R1P+WwQqmmMIEACyzSvo4JXHY5WiAFHRMg+zBZKgKS+Q1viRa0C1hmUKtHltoIFKtIdki3pRxkmpP74jnNYHQ=="],
 
     "@react-native/community-cli-plugin/metro": ["metro@0.83.4", "", { "dependencies": { "@babel/code-frame": "^7.29.0", "@babel/core": "^7.25.2", "@babel/generator": "^7.29.1", "@babel/parser": "^7.29.0", "@babel/template": "^7.28.6", "@babel/traverse": "^7.29.0", "@babel/types": "^7.29.0", "accepts": "^2.0.0", "chalk": "^4.0.0", "ci-info": "^2.0.0", "connect": "^3.6.5", "debug": "^4.4.0", "error-stack-parser": "^2.0.6", "flow-enums-runtime": "^0.0.6", "graceful-fs": "^4.2.4", "hermes-parser": "0.33.3", "image-size": "^1.0.2", "invariant": "^2.2.4", "jest-worker": "^29.7.0", "jsc-safe-url": "^0.2.2", "lodash.throttle": "^4.1.1", "metro-babel-transformer": "0.83.4", "metro-cache": "0.83.4", "metro-cache-key": "0.83.4", "metro-config": "0.83.4", "metro-core": "0.83.4", "metro-file-map": "0.83.4", "metro-resolver": "0.83.4", "metro-runtime": "0.83.4", "metro-source-map": "0.83.4", "metro-symbolicate": "0.83.4", "metro-transform-plugins": "0.83.4", "metro-transform-worker": "0.83.4", "mime-types": "^3.0.1", "nullthrows": "^1.1.1", "serialize-error": "^2.1.0", "source-map": "^0.5.6", "throat": "^5.0.0", "ws": "^7.5.10", "yargs": "^17.6.2" }, "bin": { "metro": "src/cli.js" } }, "sha512-eBkAtcob+YmvSLL+/rsFiK8dHNfDbQA2/pi0lnxg3E6LLtUpwDfdGJ9WBWXkj0PVeOhoWQyj9Rt7s/+6k/GXuA=="],
 

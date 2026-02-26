@@ -1,0 +1,23 @@
+{
+  "name": "@remocode/opencode-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.2.14",
+    "@remocode/contracts": "workspace:*",
+    "socket.io-client": "^4.8.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
