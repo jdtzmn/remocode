@@ -3155,3 +3155,189 @@ describe("E2E: notification suppression", () => {
     expect(notifStores.pushCalls).toHaveLength(1)
   })
 })
+
+// ---------------------------------------------------------------------------
+// 11. E2E: User isolation — user A cannot view or act on user B requests
+// ---------------------------------------------------------------------------
+//
+// Scenario:
+//   Both user A and user B have sessions and open attention requests.
+//   1. sessionsOpen for user A returns only user A's sessions (not user B's)
+//   2. sessionsOpen for user B returns only user B's sessions (not user A's)
+//   3. User A attempting to respond to user B's request gets REQUEST_NOT_FOUND
+//   4. User B's blocker events do not affect user A's requires_attention state
+//   5. Resolving user B's blocker does not change user A's session ordering
+
+describe("E2E: user isolation", () => {
+  it("sessionsOpen returns only the requesting user's sessions", async () => {
+    const stores = createOrderingStores()
+    const { ingest, sessionsOpen } = createFullOrderingServices(stores)
+
+    const userA = "user-iso-A"
+    const userB = "user-iso-B"
+
+    // Ingest sessions for user A
+    await ingest({
+      userId: userA,
+      payload: {
+        events: [
+          sessionCreatedEvent("aa000001-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+            deviceUid: "dev-iso-A",
+            sessionId: "session-iso-A1",
+            title: "User A Session 1",
+          }),
+          sessionCreatedEvent("aa000002-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+            deviceUid: "dev-iso-A",
+            sessionId: "session-iso-A2",
+            title: "User A Session 2",
+          }),
+        ],
+      },
+    })
+
+    // Ingest sessions for user B
+    await ingest({
+      userId: userB,
+      payload: {
+        events: [
+          sessionCreatedEvent("bb000001-bbbb-4bbb-8bbb-bbbbbbbbbbbb", {
+            deviceUid: "dev-iso-B",
+            sessionId: "session-iso-B1",
+            title: "User B Session 1",
+          }),
+        ],
+      },
+    })
+
+    // User A's view should only contain user A's sessions
+    const resultA = await sessionsOpen({ userId: userA })
+    const sessionIdsA = resultA.groups.flatMap((g) => g.sessions.map((s) => s.session_id))
+    expect(sessionIdsA).toContain("session-iso-A1")
+    expect(sessionIdsA).toContain("session-iso-A2")
+    expect(sessionIdsA).not.toContain("session-iso-B1")
+
+    // User B's view should only contain user B's sessions
+    const resultB = await sessionsOpen({ userId: userB })
+    const sessionIdsB = resultB.groups.flatMap((g) => g.sessions.map((s) => s.session_id))
+    expect(sessionIdsB).toContain("session-iso-B1")
+    expect(sessionIdsB).not.toContain("session-iso-A1")
+    expect(sessionIdsB).not.toContain("session-iso-A2")
+  })
+
+  it("user A cannot respond to user B's open request — returns REQUEST_NOT_FOUND", async () => {
+    const stores = createOrderingStores()
+    const { ingest } = createFullOrderingServices(stores)
+
+    const userA = "user-iso-act-A"
+    const userB = "user-iso-act-B"
+
+    // Ingest a permission.asked for user B
+    await ingest({
+      userId: userB,
+      payload: {
+        events: [
+          sessionCreatedEvent("cc000001-cccc-4ccc-8ccc-cccccccccccc", {
+            deviceUid: "dev-iso-act-B",
+            sessionId: "session-iso-act-B",
+            title: "User B Session",
+          }),
+          permissionAskedEvent("cc000002-cccc-4ccc-8ccc-cccccccccccc", {
+            deviceUid: "dev-iso-act-B",
+            requestId: "req-iso-B",
+            sessionId: "session-iso-act-B",
+          }),
+        ],
+      },
+    })
+
+    // Verify user B's request is open
+    expect(stores.requests.get("req-iso-B")?.status).toBe("open")
+    expect(stores.requests.get("req-iso-B")?.userId).toBe(userB)
+
+    const relay = vi.fn().mockResolvedValue({ command_id: "cmd-iso", accepted: true, error: null })
+    const respondService = createRequestRespondService(stores.respondStore, relay)
+
+    // User A attempts to respond to user B's request
+    await expect(
+      respondService({
+        userId: userA,
+        requestId: "req-iso-B",
+        payload: {
+          type: "permission",
+          decision: "once",
+          client_action_id: "11110000-1111-4111-8111-111111111111",
+        },
+      }),
+    ).rejects.toMatchObject({ code: "REQUEST_NOT_FOUND" })
+
+    // Relay was never called — cross-user access was rejected before any command relay
+    expect(relay).not.toHaveBeenCalled()
+
+    // User B's request remains open (not accidentally closed)
+    expect(stores.requests.get("req-iso-B")?.status).toBe("open")
+  })
+
+  it("user B's blocker events do not affect user A's requires_attention state", async () => {
+    const stores = createOrderingStores()
+    const { ingest, sessionsOpen } = createFullOrderingServices(stores)
+
+    const userA = "user-iso-attn-A"
+    const userB = "user-iso-attn-B"
+
+    // Both users have sessions on different devices
+    await ingest({
+      userId: userA,
+      payload: {
+        events: [
+          sessionCreatedEvent("dd000001-dddd-4ddd-8ddd-dddddddddddd", {
+            deviceUid: "dev-iso-attn-A",
+            sessionId: "session-iso-attn-A",
+            title: "User A Session",
+          }),
+        ],
+      },
+    })
+
+    await ingest({
+      userId: userB,
+      payload: {
+        events: [
+          sessionCreatedEvent("dd000002-dddd-4ddd-8ddd-dddddddddddd", {
+            deviceUid: "dev-iso-attn-B",
+            sessionId: "session-iso-attn-B",
+            title: "User B Session",
+          }),
+        ],
+      },
+    })
+
+    // User A's session starts with no attention
+    const beforeA = await sessionsOpen({ userId: userA })
+    expect(beforeA.groups[0].sessions[0].requires_attention).toBe(false)
+    expect(beforeA.groups[0].sessions[0].attention_count).toBe(0)
+
+    // User B gets a blocker
+    await ingest({
+      userId: userB,
+      payload: {
+        events: [
+          permissionAskedEvent("dd000003-dddd-4ddd-8ddd-dddddddddddd", {
+            deviceUid: "dev-iso-attn-B",
+            requestId: "req-iso-attn-B",
+            sessionId: "session-iso-attn-B",
+          }),
+        ],
+      },
+    })
+
+    // User B's session now requires attention
+    const afterB = await sessionsOpen({ userId: userB })
+    expect(afterB.groups[0].sessions[0].requires_attention).toBe(true)
+    expect(afterB.groups[0].sessions[0].attention_count).toBe(1)
+
+    // User A's session must remain unaffected by user B's blocker
+    const afterA = await sessionsOpen({ userId: userA })
+    expect(afterA.groups[0].sessions[0].requires_attention).toBe(false)
+    expect(afterA.groups[0].sessions[0].attention_count).toBe(0)
+  })
+})
