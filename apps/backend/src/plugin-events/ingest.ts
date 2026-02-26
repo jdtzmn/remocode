@@ -8,6 +8,7 @@ import {
 import { z } from "zod"
 
 import { ApiHttpError } from "../http/errors"
+import type { SessionProjectionReducer } from "../session-projections/reducer"
 
 const PluginEventsEnvelopeSchema = z
   .object({
@@ -26,6 +27,7 @@ type PersistInput = {
 type PersistedEventStore = {
   getOrCreateDeviceId: (args: { userId: string; deviceUid: string }) => Promise<string>
   persistEvent: (input: PersistInput) => Promise<PersistResult>
+  projectEvent?: SessionProjectionReducer
 }
 
 export type PluginEventsIngestService = (args: {
@@ -102,6 +104,15 @@ export function createPluginEventsIngestService(
           deduped += 1
         } else {
           accepted += 1
+
+          if (store.projectEvent) {
+            await store.projectEvent({
+              event,
+              userId,
+              deviceId,
+              receivedAt: new Date(),
+            })
+          }
         }
       } catch {
         errors.push({

@@ -1,6 +1,7 @@
 import { db } from "../db"
 import { sessionEvents } from "../db/schema"
 import { getOrCreateDeviceIdForUser } from "../devices/repository"
+import { runtimeSessionProjectionReducer } from "../session-projections/runtime"
 import { createPluginEventsIngestService } from "./ingest"
 
 export const runtimePluginEventsIngestService = createPluginEventsIngestService({
@@ -24,4 +25,5 @@ export const runtimePluginEventsIngestService = createPluginEventsIngestService(
 
     return inserted.length === 0 ? "deduped" : "accepted"
   },
+  projectEvent: runtimeSessionProjectionReducer,
 })
