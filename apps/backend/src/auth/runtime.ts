@@ -41,15 +41,23 @@ async function resolveOrCreateUserId(supabaseUserId: string) {
   return found[0].id
 }
 
-export function createRuntimeAuthMiddlewares(env: AppEnv) {
-  const authEnv = requireAuthEnv(env)
-
-  const verifyToken = createSupabaseJwtVerifier({
+export function createRuntimeSupabaseJwtVerifier(authEnv: {
+  SUPABASE_ISSUER: string
+  SUPABASE_AUDIENCE: string
+  SUPABASE_JWKS_URL: string
+}) {
+  return createSupabaseJwtVerifier({
     issuer: authEnv.SUPABASE_ISSUER,
     audience: authEnv.SUPABASE_AUDIENCE,
     jwksUrl: authEnv.SUPABASE_JWKS_URL,
     resolveUserId: resolveOrCreateUserId,
   })
+}
+
+export function createRuntimeAuthMiddlewares(env: AppEnv) {
+  const authEnv = requireAuthEnv(env)
+
+  const verifyToken = createRuntimeSupabaseJwtVerifier(authEnv)
 
   const authenticate = createPatAuthenticator({
     pepper: authEnv.PAT_HASH_PEPPER,
