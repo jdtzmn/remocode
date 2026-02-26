@@ -1,15 +1,19 @@
 import { Hono } from "hono"
 import type { MiddlewareHandler } from "hono"
 
-import { PluginHeartbeatRequestSchema, SessionsOpenResponseSchema } from "@remocode/contracts"
+import { SessionsOpenResponseSchema } from "@remocode/contracts"
 
 import type { AuthBindings } from "./auth/types"
 import { ApiHttpError, toApiErrorResponse, toApiHttpError } from "./http/errors"
+import type { PluginActivityService } from "./plugin-activity/service"
 import type { PluginEventsIngestService } from "./plugin-events/ingest"
+import type { PluginHeartbeatService } from "./plugin-heartbeat/service"
 
 type CreateAppOptions = {
   appAuthMiddleware?: MiddlewareHandler<AuthBindings>
   pluginAuthMiddleware?: MiddlewareHandler<AuthBindings>
+  pluginHeartbeat?: PluginHeartbeatService
+  pluginActivity?: PluginActivityService
   pluginEventsIngest?: PluginEventsIngestService
 }
 
@@ -21,6 +25,22 @@ function rejectWithUnauthorized(message: string): MiddlewareHandler<AuthBindings
 
 export function createApp(options: CreateAppOptions = {}) {
   const app = new Hono<AuthBindings>()
+
+  const pluginHeartbeat =
+    options.pluginHeartbeat ??
+    (async () => {
+      throw new ApiHttpError("INTERNAL_ERROR", {
+        message: "Plugin heartbeat service is not configured",
+      })
+    })
+
+  const pluginActivity =
+    options.pluginActivity ??
+    (async () => {
+      throw new ApiHttpError("INTERNAL_ERROR", {
+        message: "Plugin activity service is not configured",
+      })
+    })
 
   const pluginEventsIngest =
     options.pluginEventsIngest ??
@@ -72,9 +92,31 @@ export function createApp(options: CreateAppOptions = {}) {
       throw new ApiHttpError("INVALID_PAYLOAD")
     }
 
-    PluginHeartbeatRequestSchema.parse(body)
     context.get("pluginAuth")
-    return context.json({ ok: true })
+    const auth = context.get("pluginAuth")
+    const response = await pluginHeartbeat({
+      userId: auth.userId,
+      payload: body,
+    })
+    return context.json(response)
+  })
+
+  app.post("/v1/plugin/activity", async (context) => {
+    let body: unknown
+
+    try {
+      body = await context.req.json()
+    } catch {
+      throw new ApiHttpError("INVALID_PAYLOAD")
+    }
+
+    const auth = context.get("pluginAuth")
+    const response = await pluginActivity({
+      userId: auth.userId,
+      payload: body,
+    })
+
+    return context.json(response)
   })
 
   app.post("/v1/plugin/events", async (context) => {

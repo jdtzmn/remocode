@@ -5,12 +5,20 @@ import { z } from "zod"
 import { createApp } from "./app"
 import { createAppAuthMiddleware, createPluginAuthMiddleware } from "./auth/middleware"
 import { ApiHttpError } from "./http/errors"
+import { createPluginActivityService } from "./plugin-activity/service"
 import type { PluginEventsIngestService } from "./plugin-events/ingest"
+import { createPluginHeartbeatService } from "./plugin-heartbeat/service"
 
 const validJwt = "jwt-valid"
 const validPat = "pat_validPrefix_validSecret"
 
-function createProtectedApp(options: { pluginEventsIngest?: PluginEventsIngestService } = {}) {
+function createProtectedApp(
+  options: {
+    pluginHeartbeat?: ReturnType<typeof createPluginHeartbeatService>
+    pluginActivity?: ReturnType<typeof createPluginActivityService>
+    pluginEventsIngest?: PluginEventsIngestService
+  } = {},
+) {
   return createApp({
     appAuthMiddleware: createAppAuthMiddleware({
       verifyToken: async (token) => {
@@ -38,6 +46,16 @@ function createProtectedApp(options: { pluginEventsIngest?: PluginEventsIngestSe
         }
       },
     }),
+    pluginHeartbeat:
+      options.pluginHeartbeat ??
+      createPluginHeartbeatService({
+        recordHeartbeat: async () => undefined,
+      }),
+    pluginActivity:
+      options.pluginActivity ??
+      createPluginActivityService({
+        recordActivity: async () => undefined,
+      }),
     pluginEventsIngest:
       options.pluginEventsIngest ??
       (async () => ({
@@ -55,6 +73,20 @@ function createHeartbeatBody() {
     uptime_sec: 60,
     active_session_ids: ["session-1"],
     sent_at: "2026-02-22T10:30:00.000Z",
+  }
+}
+
+function createActivityBody() {
+  return {
+    device_uid: "device-1",
+    sample: {
+      is_active: true,
+      idle_seconds: 0,
+      frontmost_app: "Terminal",
+      terminal_frontmost: true,
+      sampled_at: "2026-02-22T10:30:00.000Z",
+      confidence: "high",
+    },
   }
 }
 
@@ -254,6 +286,44 @@ describe("createApp", () => {
         "content-type": "application/json",
       },
       body: JSON.stringify({}),
+    })
+    const body = await response.json()
+
+    expect(response.status).toBe(400)
+    expect(body).toMatchObject({
+      error: {
+        code: "INVALID_PAYLOAD",
+      },
+    })
+    expect(ApiErrorSchema.safeParse(body).success).toBe(true)
+  })
+
+  it("authorizes plugin activity route with PAT", async () => {
+    const app = createProtectedApp()
+    const response = await app.request("/v1/plugin/activity", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${validPat}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(createActivityBody()),
+    })
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual({ ok: true })
+  })
+
+  it("maps activity payload validation failures to INVALID_PAYLOAD", async () => {
+    const app = createProtectedApp()
+    const response = await app.request("/v1/plugin/activity", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${validPat}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        device_uid: "device-1",
+      }),
     })
     const body = await response.json()
 
