@@ -1,0 +1,1318 @@
+/**
+ * Integration tests covering cross-cutting scenarios:
+ *
+ * 1. Ingest idempotency — duplicate event_id must be deduped
+ * 2. Action relay to mocked plugin socket — relay emits correct Socket.IO event and returns ack
+ * 3. Request lifecycle — open → resolved/rejected via ingest + respond
+ * 4. Multi-user data isolation — user A cannot view or act on user B data
+ *
+ * All tests use in-memory state stores (no database) wired together through real service
+ * implementations to exercise actual business logic and integration between layers.
+ */
+
+import { createServer } from "node:http"
+import type { AddressInfo } from "node:net"
+import { Server } from "socket.io"
+import { io as ioc } from "socket.io-client"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+
+import { createAttentionRequestReducer } from "./attention-requests/reducer"
+import type { AttentionRequestInput, AttentionRequestStore } from "./attention-requests/reducer"
+import { ApiHttpError } from "./http/errors"
+import { createPluginEventsIngestService } from "./plugin-events/ingest"
+import { createRequestRespondService } from "./requests/respond-service"
+import type { AttentionRequestRow, RequestRespondStore } from "./requests/respond-service"
+import { createSessionProjectionReducer } from "./session-projections/reducer"
+import type {
+  SessionProjectionInput,
+  SessionProjectionStore,
+  SessionProjectionUpdate,
+} from "./session-projections/reducer"
+import { configurePluginNamespace } from "./socket/plugin-namespace"
+import type { PluginAckEnvelope, PluginCommandEnvelope } from "./socket/types"
+
+// ---------------------------------------------------------------------------
+// In-memory state types
+// ---------------------------------------------------------------------------
+
+type EventRecord = {
+  eventId: string
+  userId: string
+  deviceId: string
+  eventType: string
+  sessionId: string | null
+  payload: unknown
+}
+
+type SessionRecord = {
+  sessionId: string
+  userId: string
+  deviceId: string
+  receivedAt: Date
+  title: string | null
+  directory: string | null
+  sessionState: "busy" | "retry" | "idle" | "unknown"
+  isOpen: boolean
+  requiresAttention: boolean
+  lastEventAt: Date
+  isStale: boolean
+  attentionCount: number
+  lastAttentionAt: Date | null
+}
+
+type RequestRecord = AttentionRequestInput & {
+  status: "open" | "resolved" | "rejected" | "expired"
+}
+
+type ActionAttemptRecord = {
+  userId: string
+  clientActionId: string
+  requestId: string
+  status: "accepted" | "failed"
+  errorCode: string | null
+  result: Record<string, unknown>
+}
+
+// ---------------------------------------------------------------------------
+// In-memory store factory
+// ---------------------------------------------------------------------------
+
+function createInMemoryStores() {
+  const events: EventRecord[] = []
+  const sessions: Map<string, SessionRecord> = new Map()
+  const requests: Map<string, RequestRecord> = new Map()
+  const actionAttempts: Map<string, ActionAttemptRecord> = new Map()
+  const deviceMap: Map<string, string> = new Map() // "userId:deviceUid" -> deviceId
+
+  // Ingest store
+  const ingestStore = {
+    getOrCreateDeviceId: async ({ userId, deviceUid }: { userId: string; deviceUid: string }) => {
+      const key = `${userId}:${deviceUid}`
+      if (!deviceMap.has(key)) {
+        deviceMap.set(key, `device:${userId}:${deviceUid}`)
+      }
+      return deviceMap.get(key) as string
+    },
+    persistEvent: async ({
+      userId,
+      deviceId,
+      event,
+    }: {
+      userId: string
+      deviceId: string
+      event: { event_id: string; event_type: string; session_id?: string | null; payload: unknown }
+    }) => {
+      const existing = events.find((e) => e.eventId === event.event_id)
+      if (existing) return "deduped" as const
+
+      events.push({
+        eventId: event.event_id,
+        userId,
+        deviceId,
+        eventType: event.event_type,
+        sessionId: event.session_id ?? null,
+        payload: event.payload,
+      })
+      return "accepted" as const
+    },
+  }
+
+  // Session projection store — matches SessionProjectionStore interface
+  const sessionProjectionStore: SessionProjectionStore = {
+    upsertSession: vi.fn(async (input: SessionProjectionInput & SessionProjectionUpdate) => {
+      const existing = sessions.get(input.sessionId)
+      sessions.set(input.sessionId, {
+        sessionId: input.sessionId,
+        userId: input.userId,
+        deviceId: input.deviceId,
+        receivedAt: input.receivedAt,
+        title: input.title !== undefined ? (input.title ?? null) : (existing?.title ?? null),
+        directory:
+          input.directory !== undefined ? (input.directory ?? null) : (existing?.directory ?? null),
+        sessionState: input.sessionState ?? existing?.sessionState ?? "unknown",
+        isOpen: input.isOpen ?? existing?.isOpen ?? true,
+        requiresAttention: input.requiresAttention ?? existing?.requiresAttention ?? false,
+        lastEventAt: input.lastEventAt ?? existing?.lastEventAt ?? input.receivedAt,
+        isStale: existing?.isStale ?? false,
+        attentionCount: existing?.attentionCount ?? 0,
+        lastAttentionAt: existing?.lastAttentionAt ?? null,
+      })
+    }),
+    updateSession: vi.fn(
+      async (sessionId: string, userId: string, update: SessionProjectionUpdate) => {
+        const existing = sessions.get(sessionId)
+        if (existing && existing.userId === userId) {
+          sessions.set(sessionId, { ...existing, ...update })
+        }
+      },
+    ),
+    updateSessionsHeartbeat: vi.fn(async () => {}),
+  }
+
+  // Attention request store — matches AttentionRequestStore interface
+  const attentionRequestStore: AttentionRequestStore = {
+    upsertRequest: vi.fn(async (input: AttentionRequestInput) => {
+      const existing = requests.get(input.requestId)
+      requests.set(input.requestId, {
+        ...input,
+        status: existing?.status ?? "open",
+      })
+    }),
+    closeRequest: vi.fn(
+      async ({
+        requestId,
+        userId: _userId,
+        status,
+      }: {
+        requestId: string
+        userId: string
+        status: "resolved" | "rejected"
+        resolvedAt: Date
+      }) => {
+        const existing = requests.get(requestId)
+        if (existing) {
+          requests.set(requestId, { ...existing, status })
+        }
+      },
+    ),
+    countOpenRequests: vi.fn(
+      async ({ sessionId, userId }: { sessionId: string; userId: string }) =>
+        [...requests.values()].filter(
+          (r) => r.sessionId === sessionId && r.userId === userId && r.status === "open",
+        ).length,
+    ),
+    updateSessionAttention: vi.fn(async () => {}),
+  }
+
+  // Respond store
+  const respondStore: RequestRespondStore = {
+    getRequest: async ({ requestId, userId }) => {
+      const row = requests.get(requestId)
+      if (!row || row.userId !== userId) return null
+      return row as AttentionRequestRow
+    },
+    getActionAttempt: async ({ userId, clientActionId }) => {
+      const key = `${userId}:${clientActionId}`
+      return actionAttempts.get(key) ?? null
+    },
+    saveActionAttempt: async ({ userId, clientActionId, requestId, status, errorCode, result }) => {
+      const key = `${userId}:${clientActionId}`
+      actionAttempts.set(key, { userId, clientActionId, requestId, status, errorCode, result })
+    },
+  }
+
+  return {
+    events,
+    sessions,
+    requests,
+    actionAttempts,
+    ingestStore,
+    sessionProjectionStore,
+    attentionRequestStore,
+    respondStore,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Event factory helpers
+// ---------------------------------------------------------------------------
+
+function permissionAskedEvent(
+  eventId: string,
+  opts: { deviceUid?: string; requestId?: string; sessionId?: string } = {},
+) {
+  return {
+    event_id: eventId,
+    adapter: "opencode",
+    adapter_version: "1.0.0",
+    device_uid: opts.deviceUid ?? "dev-uid-1",
+    event_type: "permission.asked",
+    session_id: opts.sessionId ?? "session-abc",
+    occurred_at: "2026-02-22T10:30:00.000Z",
+    payload: {
+      id: opts.requestId ?? "perm-01",
+      sessionID: opts.sessionId ?? "session-abc",
+      permission: "bash",
+      patterns: ["npm install"],
+      always: [],
+      metadata: {},
+    },
+  }
+}
+
+function permissionRepliedEvent(
+  eventId: string,
+  opts: { deviceUid?: string; requestId?: string; sessionId?: string; reply?: string } = {},
+) {
+  return {
+    event_id: eventId,
+    adapter: "opencode",
+    adapter_version: "1.0.0",
+    device_uid: opts.deviceUid ?? "dev-uid-1",
+    event_type: "permission.replied",
+    session_id: opts.sessionId ?? "session-abc",
+    occurred_at: "2026-02-22T10:31:00.000Z",
+    payload: {
+      sessionID: opts.sessionId ?? "session-abc",
+      requestID: opts.requestId ?? "perm-01",
+      reply: opts.reply ?? "once",
+    },
+  }
+}
+
+function questionAskedEvent(
+  eventId: string,
+  opts: { deviceUid?: string; requestId?: string; sessionId?: string } = {},
+) {
+  return {
+    event_id: eventId,
+    adapter: "opencode",
+    adapter_version: "1.0.0",
+    device_uid: opts.deviceUid ?? "dev-uid-1",
+    event_type: "question.asked",
+    session_id: opts.sessionId ?? "session-abc",
+    occurred_at: "2026-02-22T10:30:00.000Z",
+    payload: {
+      id: opts.requestId ?? "question-01",
+      sessionID: opts.sessionId ?? "session-abc",
+      questions: [
+        {
+          header: "Test Scope",
+          question: "Which tests?",
+          options: [
+            { label: "Unit", description: "Run unit tests only" },
+            { label: "All", description: "Run all test suites" },
+          ],
+        },
+      ],
+    },
+  }
+}
+
+function questionRejectedEvent(
+  eventId: string,
+  opts: { deviceUid?: string; requestId?: string; sessionId?: string } = {},
+) {
+  return {
+    event_id: eventId,
+    adapter: "opencode",
+    adapter_version: "1.0.0",
+    device_uid: opts.deviceUid ?? "dev-uid-1",
+    event_type: "question.rejected",
+    session_id: opts.sessionId ?? "session-abc",
+    occurred_at: "2026-02-22T10:32:00.000Z",
+    payload: {
+      sessionID: opts.sessionId ?? "session-abc",
+      requestID: opts.requestId ?? "question-01",
+    },
+  }
+}
+
+function sessionCreatedEvent(
+  eventId: string,
+  opts: { deviceUid?: string; sessionId?: string; title?: string } = {},
+) {
+  const sessionId = opts.sessionId ?? "session-abc"
+  return {
+    event_id: eventId,
+    adapter: "opencode",
+    adapter_version: "1.0.0",
+    device_uid: opts.deviceUid ?? "dev-uid-1",
+    event_type: "session.created",
+    session_id: sessionId,
+    occurred_at: "2026-02-22T10:29:00.000Z",
+    payload: {
+      info: {
+        id: sessionId,
+        title: opts.title ?? "Refactor auth",
+        directory: "/home/user/project",
+        projectID: "proj-1",
+        version: "1",
+        time: { created: 1708559400000, updated: 1708559400000 },
+      },
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: build a full ingest service with all reducers wired in
+// ---------------------------------------------------------------------------
+
+function createFullIngestService(stores: ReturnType<typeof createInMemoryStores>) {
+  const projectEvent = createSessionProjectionReducer(stores.sessionProjectionStore)
+  const projectAttention = createAttentionRequestReducer(stores.attentionRequestStore)
+
+  return createPluginEventsIngestService({
+    ...stores.ingestStore,
+    projectEvent,
+    projectAttention,
+  })
+}
+
+// ---------------------------------------------------------------------------
+// 1. Ingest idempotency
+// ---------------------------------------------------------------------------
+
+describe("Integration: ingest idempotency", () => {
+  it("accepts the first occurrence and dedupes subsequent identical event_ids", async () => {
+    const stores = createInMemoryStores()
+    const ingest = createFullIngestService(stores)
+    const eventId = "11111111-1111-4111-8111-111111111111"
+
+    // First ingest
+    const first = await ingest({
+      userId: "user-1",
+      payload: { events: [permissionAskedEvent(eventId)] },
+    })
+    expect(first.accepted).toBe(1)
+    expect(first.deduped).toBe(0)
+    expect(stores.events).toHaveLength(1)
+
+    // Second ingest with same event_id
+    const second = await ingest({
+      userId: "user-1",
+      payload: { events: [permissionAskedEvent(eventId)] },
+    })
+    expect(second.accepted).toBe(0)
+    expect(second.deduped).toBe(1)
+    // Event log should still be length 1 — no duplicate row
+    expect(stores.events).toHaveLength(1)
+  })
+
+  it("dedupes across different users sending the same event_id (globally unique)", async () => {
+    const stores = createInMemoryStores()
+    const ingest = createFullIngestService(stores)
+    const eventId = "22222222-2222-4222-8222-222222222222"
+
+    const first = await ingest({
+      userId: "user-1",
+      payload: { events: [sessionCreatedEvent(eventId, { deviceUid: "dev-uid-1" })] },
+    })
+    expect(first.accepted).toBe(1)
+
+    // Same event_id from user-2 — deduped because event_id is globally unique
+    const second = await ingest({
+      userId: "user-2",
+      payload: {
+        events: [
+          sessionCreatedEvent(eventId, { deviceUid: "dev-uid-2", sessionId: "session-xyz" }),
+        ],
+      },
+    })
+    expect(second.deduped).toBe(1)
+  })
+
+  it("accepts events with different event_ids as separate events", async () => {
+    const stores = createInMemoryStores()
+    const ingest = createFullIngestService(stores)
+
+    const result = await ingest({
+      userId: "user-1",
+      payload: {
+        events: [
+          permissionAskedEvent("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", { requestId: "perm-1" }),
+          permissionAskedEvent("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", {
+            requestId: "perm-2",
+            sessionId: "session-xyz",
+          }),
+        ],
+      },
+    })
+
+    expect(result.accepted).toBe(2)
+    expect(result.deduped).toBe(0)
+    expect(stores.events).toHaveLength(2)
+  })
+
+  it("session projection is not updated for deduped events", async () => {
+    const stores = createInMemoryStores()
+    const ingest = createFullIngestService(stores)
+    const eventId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+
+    // First ingest creates session
+    await ingest({
+      userId: "user-1",
+      payload: { events: [sessionCreatedEvent(eventId)] },
+    })
+    expect(stores.sessionProjectionStore.upsertSession).toHaveBeenCalledOnce()
+
+    // Second ingest with same event_id — projection should NOT be called again
+    await ingest({
+      userId: "user-1",
+      payload: { events: [sessionCreatedEvent(eventId)] },
+    })
+    expect(stores.sessionProjectionStore.upsertSession).toHaveBeenCalledOnce() // still once
+  })
+
+  it("attention request is not created for deduped blocker events", async () => {
+    const stores = createInMemoryStores()
+    const ingest = createFullIngestService(stores)
+    const eventId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+
+    await ingest({
+      userId: "user-1",
+      payload: { events: [permissionAskedEvent(eventId)] },
+    })
+    expect(stores.requests.size).toBe(1)
+
+    // Second ingest with same event_id — no new request
+    await ingest({
+      userId: "user-1",
+      payload: { events: [permissionAskedEvent(eventId)] },
+    })
+    expect(stores.requests.size).toBe(1) // still one request
+  })
+
+  it("returns error entry for invalid events but continues processing valid ones", async () => {
+    const stores = createInMemoryStores()
+    const ingest = createFullIngestService(stores)
+
+    const result = await ingest({
+      userId: "user-1",
+      payload: {
+        events: [
+          sessionCreatedEvent("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"),
+          // Invalid: uptime_sec -1 is invalid for plugin.heartbeat
+          {
+            event_id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+            adapter: "opencode",
+            adapter_version: "1.0.0",
+            device_uid: "dev-uid-1",
+            event_type: "plugin.heartbeat",
+            occurred_at: "2026-02-22T10:30:00.000Z",
+            payload: { uptime_sec: -1, active_session_ids: [], queue_depth: 0 },
+          },
+          sessionCreatedEvent("11111111-1111-4111-8111-111111111111", { sessionId: "session-2" }),
+        ],
+      },
+    })
+
+    expect(result.accepted).toBe(2)
+    expect(result.deduped).toBe(0)
+    expect(result.errors).toHaveLength(1)
+    expect(result.errors[0].event_id).toBe("ffffffff-ffff-4fff-8fff-ffffffffffff")
+    expect(result.errors[0].code).toBe("INVALID_PAYLOAD")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 2. Action relay to mocked plugin socket
+// ---------------------------------------------------------------------------
+
+function startTestServer(io: Server): Promise<{ port: number; close: () => Promise<void> }> {
+  return new Promise((resolve) => {
+    const httpServer = createServer()
+    io.attach(httpServer)
+    httpServer.listen(0, "127.0.0.1", () => {
+      const { port } = httpServer.address() as AddressInfo
+      resolve({
+        port,
+        close: () =>
+          new Promise((res) => {
+            io.close(() => {
+              httpServer.close(() => res())
+            })
+          }),
+      })
+    })
+  })
+}
+
+/** Build a relay function that routes to a live Socket.IO server with a given timeout. */
+function createSocketRelay(
+  io: Server,
+  timeoutMs = 3000,
+): (args: {
+  deviceId: string
+  envelope: PluginCommandEnvelope
+  eventType: "action.permission.reply" | "action.question.reply" | "action.question.reject"
+}) => Promise<PluginAckEnvelope> {
+  return (args) => {
+    const pluginNs = io.of("/plugin")
+    return new Promise((resolve, reject) => {
+      pluginNs
+        .to(`device:${args.deviceId}`)
+        .timeout(timeoutMs)
+        .emit(args.eventType, args.envelope, (err: Error | null, acks: PluginAckEnvelope[]) => {
+          if (err || !acks || acks.length === 0) {
+            reject(new ApiHttpError("RELAY_TIMEOUT"))
+          } else {
+            resolve(acks[0])
+          }
+        })
+    })
+  }
+}
+
+describe("Integration: action relay to mocked plugin socket", () => {
+  let io: Server
+  let port: number
+  let closeServer: () => Promise<void>
+  const validPat = "pat_testprefix_testSecret"
+  const userId = "user-relay-1"
+  const deviceUid = "device-uid-relay"
+  const deviceId = "device-db-relay"
+
+  beforeEach(async () => {
+    io = new Server({ transports: ["websocket"] })
+    configurePluginNamespace(io, {
+      authenticate: async (token) => {
+        if (token !== validPat) {
+          throw new ApiHttpError("UNAUTHORIZED")
+        }
+        return { userId, patId: "pat-1", tokenPrefix: "testprefix" }
+      },
+      getOrCreateDeviceId: async () => deviceId,
+    })
+    const server = await startTestServer(io)
+    port = server.port
+    closeServer = server.close
+  })
+
+  afterEach(async () => {
+    await closeServer()
+  })
+
+  it("relays permission.reply to connected plugin socket and receives ack", async () => {
+    const stores = createInMemoryStores()
+    // Pre-populate an open permission request for this user/device
+    stores.requests.set("perm-relay-1", {
+      requestId: "perm-relay-1",
+      userId,
+      deviceId,
+      sessionId: "session-relay",
+      kind: "permission",
+      openedAt: new Date(),
+      payload: {},
+      status: "open",
+    })
+
+    const relay = createSocketRelay(io)
+    const respondService = createRequestRespondService(stores.respondStore, relay)
+
+    // Connect a plugin client and set up handler
+    const pluginClient = ioc(`http://127.0.0.1:${port}/plugin`, {
+      transports: ["websocket"],
+      auth: { token: validPat, device_uid: deviceUid },
+    })
+
+    const receivedCommands: Array<{ eventType: string; envelope: PluginCommandEnvelope }> = []
+    pluginClient.on(
+      "action.permission.reply",
+      (envelope: PluginCommandEnvelope, ack: (r: PluginAckEnvelope) => void) => {
+        receivedCommands.push({ eventType: "action.permission.reply", envelope })
+        ack({ command_id: envelope.command_id, accepted: true, error: null })
+      },
+    )
+
+    await new Promise<void>((resolve, reject) => {
+      pluginClient.on("connect", resolve)
+      pluginClient.on("connect_error", reject)
+    })
+    // Small wait for room join to propagate
+    await new Promise<void>((resolve) => setTimeout(resolve, 100))
+
+    try {
+      const result = await respondService({
+        userId,
+        requestId: "perm-relay-1",
+        payload: {
+          type: "permission",
+          decision: "once",
+          client_action_id: "11111111-1111-4111-8111-111111111111",
+        },
+      })
+
+      expect(result.status).toBe("accepted")
+      expect(result.request_id).toBe("perm-relay-1")
+      expect(result.relay).toBe("sent")
+      expect(receivedCommands).toHaveLength(1)
+      expect(receivedCommands[0].eventType).toBe("action.permission.reply")
+      expect(receivedCommands[0].envelope.request_id).toBe("perm-relay-1")
+    } finally {
+      pluginClient.disconnect()
+    }
+  })
+
+  it("relays question.reply to connected plugin socket and receives ack", async () => {
+    const stores = createInMemoryStores()
+    stores.requests.set("question-relay-1", {
+      requestId: "question-relay-1",
+      userId,
+      deviceId,
+      sessionId: "session-relay",
+      kind: "question",
+      openedAt: new Date(),
+      payload: {},
+      status: "open",
+    })
+
+    const relay = createSocketRelay(io)
+    const respondService = createRequestRespondService(stores.respondStore, relay)
+
+    const pluginClient = ioc(`http://127.0.0.1:${port}/plugin`, {
+      transports: ["websocket"],
+      auth: { token: validPat, device_uid: deviceUid },
+    })
+
+    const receivedAnswers: string[][][] = []
+    pluginClient.on(
+      "action.question.reply",
+      (
+        envelope: PluginCommandEnvelope<{ answers: string[][] }>,
+        ack: (r: PluginAckEnvelope) => void,
+      ) => {
+        receivedAnswers.push(envelope.payload.answers)
+        ack({ command_id: envelope.command_id, accepted: true, error: null })
+      },
+    )
+
+    await new Promise<void>((resolve, reject) => {
+      pluginClient.on("connect", resolve)
+      pluginClient.on("connect_error", reject)
+    })
+    await new Promise<void>((resolve) => setTimeout(resolve, 100))
+
+    try {
+      const result = await respondService({
+        userId,
+        requestId: "question-relay-1",
+        payload: {
+          type: "question",
+          answers: [["All"]],
+          client_action_id: "22222222-2222-4222-8222-222222222222",
+        },
+      })
+
+      expect(result.status).toBe("accepted")
+      expect(receivedAnswers).toEqual([[["All"]]])
+    } finally {
+      pluginClient.disconnect()
+    }
+  })
+
+  it("relays question.reject to connected plugin socket and receives ack", async () => {
+    const stores = createInMemoryStores()
+    stores.requests.set("question-reject-1", {
+      requestId: "question-reject-1",
+      userId,
+      deviceId,
+      sessionId: "session-relay",
+      kind: "question",
+      openedAt: new Date(),
+      payload: {},
+      status: "open",
+    })
+
+    const relay = createSocketRelay(io)
+    const respondService = createRequestRespondService(stores.respondStore, relay)
+
+    const pluginClient = ioc(`http://127.0.0.1:${port}/plugin`, {
+      transports: ["websocket"],
+      auth: { token: validPat, device_uid: deviceUid },
+    })
+
+    const receivedRejects: string[] = []
+    pluginClient.on(
+      "action.question.reject",
+      (envelope: PluginCommandEnvelope, ack: (r: PluginAckEnvelope) => void) => {
+        receivedRejects.push(envelope.request_id)
+        ack({ command_id: envelope.command_id, accepted: true, error: null })
+      },
+    )
+
+    await new Promise<void>((resolve, reject) => {
+      pluginClient.on("connect", resolve)
+      pluginClient.on("connect_error", reject)
+    })
+    await new Promise<void>((resolve) => setTimeout(resolve, 100))
+
+    try {
+      const result = await respondService({
+        userId,
+        requestId: "question-reject-1",
+        payload: {
+          type: "question",
+          decision: "reject",
+          client_action_id: "33333333-3333-4333-8333-333333333333",
+        },
+      })
+
+      expect(result.status).toBe("accepted")
+      expect(receivedRejects).toContain("question-reject-1")
+    } finally {
+      pluginClient.disconnect()
+    }
+  })
+
+  it("returns RELAY_TIMEOUT when no plugin is connected for the device", async () => {
+    const stores = createInMemoryStores()
+    stores.requests.set("perm-offline", {
+      requestId: "perm-offline",
+      userId,
+      deviceId: "device-not-connected",
+      sessionId: "session-relay",
+      kind: "permission",
+      openedAt: new Date(),
+      payload: {},
+      status: "open",
+    })
+
+    // Very short timeout so test runs fast
+    const relay = createSocketRelay(io, 200)
+    const respondService = createRequestRespondService(stores.respondStore, relay)
+
+    await expect(
+      respondService({
+        userId,
+        requestId: "perm-offline",
+        payload: {
+          type: "permission",
+          decision: "once",
+          client_action_id: "44444444-4444-4444-8444-444444444444",
+        },
+      }),
+    ).rejects.toMatchObject({ code: "RELAY_TIMEOUT" })
+
+    // Action attempt should be saved as failed
+    const savedAttempt = stores.actionAttempts.get(`${userId}:44444444-4444-4444-8444-444444444444`)
+    expect(savedAttempt?.status).toBe("failed")
+    expect(savedAttempt?.errorCode).toBe("RELAY_TIMEOUT")
+  })
+
+  it("relay is idempotent — duplicate client_action_id returns cached result without re-relaying", async () => {
+    const stores = createInMemoryStores()
+    stores.requests.set("perm-idempotent", {
+      requestId: "perm-idempotent",
+      userId,
+      deviceId,
+      sessionId: "session-relay",
+      kind: "permission",
+      openedAt: new Date(),
+      payload: {},
+      status: "open",
+    })
+
+    let relayCalled = 0
+    const relay = vi.fn(
+      async (args: { envelope: PluginCommandEnvelope }): Promise<PluginAckEnvelope> => {
+        relayCalled++
+        return { command_id: args.envelope.command_id, accepted: true, error: null }
+      },
+    )
+
+    const respondService = createRequestRespondService(stores.respondStore, relay)
+
+    const payload = {
+      type: "permission" as const,
+      decision: "once" as const,
+      client_action_id: "55555555-5555-4555-8555-555555555555",
+    }
+
+    // First call
+    const first = await respondService({ userId, requestId: "perm-idempotent", payload })
+    expect(first.status).toBe("accepted")
+    expect(relayCalled).toBe(1)
+
+    // Second call with same client_action_id — returns cached result, no new relay
+    const second = await respondService({ userId, requestId: "perm-idempotent", payload })
+    expect(second.status).toBe("accepted")
+    expect(relayCalled).toBe(1) // relay was NOT called again
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 3. Request lifecycle (open → resolved / rejected)
+// ---------------------------------------------------------------------------
+
+describe("Integration: request lifecycle", () => {
+  it("permission.asked creates open request, permission.replied closes it as resolved", async () => {
+    const stores = createInMemoryStores()
+    const ingest = createFullIngestService(stores)
+
+    // Open the request via ingest
+    await ingest({
+      userId: "user-1",
+      payload: {
+        events: [
+          permissionAskedEvent("11111111-1111-4111-8111-111111111111", { requestId: "perm-lc-1" }),
+        ],
+      },
+    })
+
+    const openRequest = stores.requests.get("perm-lc-1")
+    expect(openRequest).toBeDefined()
+    expect(openRequest?.status).toBe("open")
+    expect(openRequest?.kind).toBe("permission")
+
+    // Close it via permission.replied
+    await ingest({
+      userId: "user-1",
+      payload: {
+        events: [
+          permissionRepliedEvent("22222222-2222-4222-8222-222222222222", {
+            requestId: "perm-lc-1",
+            reply: "once",
+          }),
+        ],
+      },
+    })
+
+    const closedRequest = stores.requests.get("perm-lc-1")
+    expect(closedRequest?.status).toBe("resolved")
+  })
+
+  it("permission.replied with reply=reject closes request as rejected", async () => {
+    const stores = createInMemoryStores()
+    const ingest = createFullIngestService(stores)
+
+    await ingest({
+      userId: "user-1",
+      payload: {
+        events: [
+          permissionAskedEvent("11111111-1111-4111-8111-111111111111", {
+            requestId: "perm-reject-1",
+          }),
+        ],
+      },
+    })
+
+    await ingest({
+      userId: "user-1",
+      payload: {
+        events: [
+          permissionRepliedEvent("22222222-2222-4222-8222-222222222222", {
+            requestId: "perm-reject-1",
+            reply: "reject",
+          }),
+        ],
+      },
+    })
+
+    const request = stores.requests.get("perm-reject-1")
+    expect(request?.status).toBe("rejected")
+  })
+
+  it("question.asked creates open question, question.rejected closes it as rejected", async () => {
+    const stores = createInMemoryStores()
+    const ingest = createFullIngestService(stores)
+
+    await ingest({
+      userId: "user-1",
+      payload: {
+        events: [
+          questionAskedEvent("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+            requestId: "question-lc-1",
+          }),
+        ],
+      },
+    })
+
+    expect(stores.requests.get("question-lc-1")?.status).toBe("open")
+    expect(stores.requests.get("question-lc-1")?.kind).toBe("question")
+
+    await ingest({
+      userId: "user-1",
+      payload: {
+        events: [
+          questionRejectedEvent("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", {
+            requestId: "question-lc-1",
+          }),
+        ],
+      },
+    })
+
+    expect(stores.requests.get("question-lc-1")?.status).toBe("rejected")
+  })
+
+  it("attention count updates as requests open and close", async () => {
+    const stores = createInMemoryStores()
+    const ingest = createFullIngestService(stores)
+
+    // Open two requests for the same session
+    await ingest({
+      userId: "user-1",
+      payload: {
+        events: [
+          permissionAskedEvent("11111111-1111-4111-8111-111111111111", {
+            requestId: "req-1",
+            sessionId: "session-multi",
+          }),
+        ],
+      },
+    })
+    await ingest({
+      userId: "user-1",
+      payload: {
+        events: [
+          questionAskedEvent("22222222-2222-4222-8222-222222222222", {
+            requestId: "req-2",
+            sessionId: "session-multi",
+          }),
+        ],
+      },
+    })
+
+    // Both requests are open
+    expect(stores.requests.get("req-1")?.status).toBe("open")
+    expect(stores.requests.get("req-2")?.status).toBe("open")
+
+    // updateSessionAttention was called for each open event
+    expect(stores.attentionRequestStore.updateSessionAttention).toHaveBeenCalled()
+
+    // Close the first request
+    await ingest({
+      userId: "user-1",
+      payload: {
+        events: [
+          permissionRepliedEvent("33333333-3333-4333-8333-333333333333", {
+            requestId: "req-1",
+            sessionId: "session-multi",
+            reply: "once",
+          }),
+        ],
+      },
+    })
+
+    expect(stores.requests.get("req-1")?.status).toBe("resolved")
+    expect(stores.requests.get("req-2")?.status).toBe("open") // still open
+  })
+
+  it("REQUEST_ALREADY_CLOSED is thrown when trying to respond to a resolved request", async () => {
+    const stores = createInMemoryStores()
+    const ingest = createFullIngestService(stores)
+
+    // Open and resolve a request via ingest
+    await ingest({
+      userId: "user-1",
+      payload: {
+        events: [
+          permissionAskedEvent("11111111-1111-4111-8111-111111111111", {
+            requestId: "perm-closed-1",
+          }),
+        ],
+      },
+    })
+    await ingest({
+      userId: "user-1",
+      payload: {
+        events: [
+          permissionRepliedEvent("22222222-2222-4222-8222-222222222222", {
+            requestId: "perm-closed-1",
+            reply: "once",
+          }),
+        ],
+      },
+    })
+
+    // Now try to respond via the respond service — should be rejected
+    const relay = vi.fn().mockResolvedValue({ command_id: "cmd-1", accepted: true, error: null })
+    const respondService = createRequestRespondService(stores.respondStore, relay)
+
+    await expect(
+      respondService({
+        userId: "user-1",
+        requestId: "perm-closed-1",
+        payload: {
+          type: "permission",
+          decision: "once",
+          client_action_id: "33333333-3333-4333-8333-333333333333",
+        },
+      }),
+    ).rejects.toMatchObject({ code: "REQUEST_ALREADY_CLOSED" })
+
+    // Relay should never have been called
+    expect(relay).not.toHaveBeenCalled()
+  })
+
+  it("REQUEST_NOT_FOUND is thrown for a non-existent request", async () => {
+    const stores = createInMemoryStores()
+    const relay = vi.fn()
+    const respondService = createRequestRespondService(stores.respondStore, relay)
+
+    await expect(
+      respondService({
+        userId: "user-1",
+        requestId: "does-not-exist",
+        payload: {
+          type: "permission",
+          decision: "once",
+          client_action_id: "44444444-4444-4444-8444-444444444444",
+        },
+      }),
+    ).rejects.toMatchObject({ code: "REQUEST_NOT_FOUND" })
+
+    expect(relay).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 4. Multi-user data isolation
+// ---------------------------------------------------------------------------
+
+describe("Integration: multi-user data isolation", () => {
+  it("ingest for user-A does not affect user-B session projections", async () => {
+    const stores = createInMemoryStores()
+    const ingest = createFullIngestService(stores)
+
+    await ingest({
+      userId: "user-A",
+      payload: {
+        events: [
+          sessionCreatedEvent("11111111-1111-4111-8111-111111111111", {
+            sessionId: "session-A",
+            title: "User A Session",
+          }),
+        ],
+      },
+    })
+
+    await ingest({
+      userId: "user-B",
+      payload: {
+        events: [
+          sessionCreatedEvent("22222222-2222-4222-8222-222222222222", {
+            sessionId: "session-B",
+            title: "User B Session",
+          }),
+        ],
+      },
+    })
+
+    const sessionA = stores.sessions.get("session-A")
+    const sessionB = stores.sessions.get("session-B")
+
+    expect(sessionA?.userId).toBe("user-A")
+    expect(sessionB?.userId).toBe("user-B")
+    expect(sessionA?.title).toBe("User A Session")
+    expect(sessionB?.title).toBe("User B Session")
+  })
+
+  it("user-A cannot act on user-B requests — returns REQUEST_NOT_FOUND", async () => {
+    const stores = createInMemoryStores()
+
+    // Create a request belonging to user-B
+    stores.requests.set("req-user-B-1", {
+      requestId: "req-user-B-1",
+      userId: "user-B",
+      deviceId: "device-B",
+      sessionId: "session-B",
+      kind: "permission",
+      openedAt: new Date(),
+      payload: {},
+      status: "open",
+    })
+
+    const relay = vi.fn().mockResolvedValue({ command_id: "cmd-1", accepted: true, error: null })
+    const respondService = createRequestRespondService(stores.respondStore, relay)
+
+    // user-A tries to respond to user-B's request — should get NOT_FOUND, not FORBIDDEN
+    // (ownership is enforced by returning null for mismatched userId)
+    await expect(
+      respondService({
+        userId: "user-A",
+        requestId: "req-user-B-1",
+        payload: {
+          type: "permission",
+          decision: "once",
+          client_action_id: "11111111-1111-4111-8111-111111111111",
+        },
+      }),
+    ).rejects.toMatchObject({ code: "REQUEST_NOT_FOUND" })
+
+    // Relay was never called
+    expect(relay).not.toHaveBeenCalled()
+  })
+
+  it("ingest events from user-A only create requests for user-A", async () => {
+    const stores = createInMemoryStores()
+    const ingest = createFullIngestService(stores)
+
+    await ingest({
+      userId: "user-A",
+      payload: {
+        events: [
+          permissionAskedEvent("11111111-1111-4111-8111-111111111111", {
+            requestId: "perm-user-A-1",
+            sessionId: "session-A",
+          }),
+        ],
+      },
+    })
+
+    await ingest({
+      userId: "user-B",
+      payload: {
+        events: [
+          permissionAskedEvent("22222222-2222-4222-8222-222222222222", {
+            requestId: "perm-user-B-1",
+            sessionId: "session-B",
+          }),
+        ],
+      },
+    })
+
+    const reqA = stores.requests.get("perm-user-A-1")
+    const reqB = stores.requests.get("perm-user-B-1")
+
+    expect(reqA?.userId).toBe("user-A")
+    expect(reqB?.userId).toBe("user-B")
+  })
+
+  it("user-A can act on their own request; user-B's request is unaffected", async () => {
+    const stores = createInMemoryStores()
+
+    stores.requests.set("req-A", {
+      requestId: "req-A",
+      userId: "user-A",
+      deviceId: "device-A",
+      sessionId: "session-A",
+      kind: "permission",
+      openedAt: new Date(),
+      payload: {},
+      status: "open",
+    })
+
+    stores.requests.set("req-B", {
+      requestId: "req-B",
+      userId: "user-B",
+      deviceId: "device-B",
+      sessionId: "session-B",
+      kind: "permission",
+      openedAt: new Date(),
+      payload: {},
+      status: "open",
+    })
+
+    const relay = vi.fn(
+      async (args: {
+        deviceId: string
+        envelope: PluginCommandEnvelope
+      }): Promise<PluginAckEnvelope> => ({
+        command_id: args.envelope.command_id,
+        accepted: true,
+        error: null,
+      }),
+    )
+    const respondService = createRequestRespondService(stores.respondStore, relay)
+
+    // user-A successfully responds to their own request
+    const result = await respondService({
+      userId: "user-A",
+      requestId: "req-A",
+      payload: {
+        type: "permission",
+        decision: "once",
+        client_action_id: "11111111-1111-4111-8111-111111111111",
+      },
+    })
+    expect(result.status).toBe("accepted")
+    expect(relay).toHaveBeenCalledOnce()
+    // Relay was called for device-A specifically
+    expect(relay.mock.calls[0][0].deviceId).toBe("device-A")
+
+    // user-B's request remains open and untouched
+    expect(stores.requests.get("req-B")?.status).toBe("open")
+  })
+
+  it("same device_uid for different users resolves to different internal device IDs", async () => {
+    const stores = createInMemoryStores()
+    const ingest = createFullIngestService(stores)
+
+    const sharedDeviceUid = "my-macbook"
+
+    await ingest({
+      userId: "user-A",
+      payload: {
+        events: [
+          sessionCreatedEvent("11111111-1111-4111-8111-111111111111", {
+            deviceUid: sharedDeviceUid,
+            sessionId: "session-A",
+          }),
+        ],
+      },
+    })
+
+    await ingest({
+      userId: "user-B",
+      payload: {
+        events: [
+          sessionCreatedEvent("22222222-2222-4222-8222-222222222222", {
+            deviceUid: sharedDeviceUid,
+            sessionId: "session-B",
+          }),
+        ],
+      },
+    })
+
+    const sessionA = stores.sessions.get("session-A")
+    const sessionB = stores.sessions.get("session-B")
+
+    // Device IDs should differ because they are keyed by userId:deviceUid
+    expect(sessionA?.deviceId).not.toBe(sessionB?.deviceId)
+    expect(sessionA?.deviceId).toBe(`device:user-A:${sharedDeviceUid}`)
+    expect(sessionB?.deviceId).toBe(`device:user-B:${sharedDeviceUid}`)
+  })
+
+  it("action_attempt idempotency is user-scoped — user-B is not affected by user-A's cached attempt", async () => {
+    const stores = createInMemoryStores()
+
+    const sharedClientActionId = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"
+
+    stores.requests.set("req-A2", {
+      requestId: "req-A2",
+      userId: "user-A",
+      deviceId: "device-A",
+      sessionId: "session-A",
+      kind: "permission",
+      openedAt: new Date(),
+      payload: {},
+      status: "open",
+    })
+
+    stores.requests.set("req-B2", {
+      requestId: "req-B2",
+      userId: "user-B",
+      deviceId: "device-B",
+      sessionId: "session-B",
+      kind: "permission",
+      openedAt: new Date(),
+      payload: {},
+      status: "open",
+    })
+
+    let relayCalled = 0
+    const relay = vi.fn(
+      async (args: { envelope: PluginCommandEnvelope }): Promise<PluginAckEnvelope> => {
+        relayCalled++
+        return { command_id: args.envelope.command_id, accepted: true, error: null }
+      },
+    )
+    const respondService = createRequestRespondService(stores.respondStore, relay)
+
+    // user-A uses the client_action_id
+    await respondService({
+      userId: "user-A",
+      requestId: "req-A2",
+      payload: {
+        type: "permission",
+        decision: "once",
+        client_action_id: sharedClientActionId,
+      },
+    })
+    expect(relayCalled).toBe(1)
+
+    // user-B uses the SAME client_action_id — idempotency is user-scoped, so a fresh relay call
+    const resultB = await respondService({
+      userId: "user-B",
+      requestId: "req-B2",
+      payload: {
+        type: "permission",
+        decision: "once",
+        client_action_id: sharedClientActionId,
+      },
+    })
+    expect(resultB.status).toBe("accepted")
+    expect(relayCalled).toBe(2) // relay was called independently for user-B
+  })
+})
