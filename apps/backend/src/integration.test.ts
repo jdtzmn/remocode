@@ -1471,14 +1471,42 @@ function createOrderingStores() {
     },
   }
 
+  const actionAttempts: Map<string, ActionAttemptRecord> = new Map()
+
+  // Respond store for E2E tests that also need relay
+  const respondStore: RequestRespondStore = {
+    getRequest: async ({ requestId, userId: uid }) => {
+      const row = requests.get(requestId)
+      if (!row || row.userId !== uid) return null
+      return row as AttentionRequestRow
+    },
+    getActionAttempt: async ({ userId: uid, clientActionId }) => {
+      const key = `${uid}:${clientActionId}`
+      return actionAttempts.get(key) ?? null
+    },
+    saveActionAttempt: async ({
+      userId: uid,
+      clientActionId,
+      requestId,
+      status,
+      errorCode,
+      result,
+    }) => {
+      const key = `${uid}:${clientActionId}`
+      actionAttempts.set(key, { userId: uid, clientActionId, requestId, status, errorCode, result })
+    },
+  }
+
   return {
     events,
     sessions,
     requests,
+    actionAttempts,
     ingestStore,
     sessionProjectionStore,
     attentionRequestStore,
     sessionsOpenStore,
+    respondStore,
   }
 }
 
@@ -1496,6 +1524,363 @@ function createFullOrderingServices(stores: ReturnType<typeof createOrderingStor
 
   return { ingest, sessionsOpen }
 }
+
+// ---------------------------------------------------------------------------
+// 6. E2E: Permission unblock round-trip
+// ---------------------------------------------------------------------------
+//
+// Scenario:
+//   1. plugin.connected + session.created arrive via ingest
+//   2. permission.asked arrives — request is open, session requires_attention=true, badge=1
+//   3. App sends "Allow once" via respond service — command relayed to live plugin socket
+//   4. Plugin acks the command and then ingests permission.replied (simulating OpenCode callback)
+//   5. Request is closed as resolved, session requires_attention=false, attention_count=0
+
+describe("E2E: permission unblock round-trip", () => {
+  let io: Server
+  let port: number
+  let closeServer: () => Promise<void>
+  const validPat = "pat_e2eperm_testSecret"
+  const userId = "user-perm-e2e"
+  const deviceUid = "dev-perm-uid"
+
+  beforeEach(async () => {
+    io = new Server({ transports: ["websocket"] })
+    configurePluginNamespace(io, {
+      authenticate: async (token) => {
+        if (token !== validPat) throw new ApiHttpError("UNAUTHORIZED")
+        return { userId, patId: "pat-perm-e2e", tokenPrefix: "e2eperm" }
+      },
+      getOrCreateDeviceId: async () => `device:${userId}:${deviceUid}`,
+    })
+    const server = await startTestServer(io)
+    port = server.port
+    closeServer = server.close
+  })
+
+  afterEach(async () => {
+    await closeServer()
+  })
+
+  it("permission.asked → Allow once → permission.replied → badge decrements to 0", async () => {
+    const stores = createOrderingStores()
+    const { ingest, sessionsOpen } = createFullOrderingServices(stores)
+    const deviceId = `device:${userId}:${deviceUid}`
+
+    // Step 1: session.created
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          sessionCreatedEvent("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+            deviceUid,
+            sessionId: "session-perm-e2e",
+            title: "E2E Permission Test Session",
+          }),
+        ],
+      },
+    })
+
+    // Step 2: permission.asked — blocker opens
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          permissionAskedEvent("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", {
+            deviceUid,
+            requestId: "perm-e2e-round-trip",
+            sessionId: "session-perm-e2e",
+          }),
+        ],
+      },
+    })
+
+    // Verify: request is open, badge is 1, requires_attention is true
+    const openRequest = stores.requests.get("perm-e2e-round-trip")
+    expect(openRequest?.status).toBe("open")
+    expect(openRequest?.kind).toBe("permission")
+
+    const afterAskedResult = await sessionsOpen({ userId })
+    expect(afterAskedResult.groups).toHaveLength(1)
+    expect(afterAskedResult.groups[0].sessions[0].requires_attention).toBe(true)
+    expect(afterAskedResult.groups[0].sessions[0].attention_count).toBe(1)
+
+    // Step 3: Connect plugin client and handle the command
+    const pluginClient = ioc(`http://127.0.0.1:${port}/plugin`, {
+      transports: ["websocket"],
+      auth: { token: validPat, device_uid: deviceUid },
+    })
+
+    // Track what the plugin receives + simulate ingesting permission.replied
+    const pluginReceivedReplies: Array<{ reply: string }> = []
+
+    pluginClient.on(
+      "action.permission.reply",
+      async (
+        envelope: PluginCommandEnvelope<{ reply: string }>,
+        ack: (r: PluginAckEnvelope) => void,
+      ) => {
+        pluginReceivedReplies.push({ reply: envelope.payload.reply })
+        // Ack the command
+        ack({ command_id: envelope.command_id, accepted: true, error: null })
+
+        // Step 4: Plugin simulates OpenCode callback — emits permission.replied back via ingest
+        await ingest({
+          userId,
+          payload: {
+            events: [
+              permissionRepliedEvent("cccccccc-cccc-4ccc-8ccc-cccccccccccc", {
+                deviceUid,
+                requestId: "perm-e2e-round-trip",
+                sessionId: "session-perm-e2e",
+                reply: envelope.payload.reply,
+              }),
+            ],
+          },
+        })
+      },
+    )
+
+    await new Promise<void>((resolve, reject) => {
+      pluginClient.on("connect", resolve)
+      pluginClient.on("connect_error", reject)
+    })
+    // Wait for room join to propagate
+    await new Promise<void>((resolve) => setTimeout(resolve, 100))
+
+    try {
+      // Step 3 (cont): App sends "Allow once" decision
+      const relay = createSocketRelay(io)
+      const respondService = createRequestRespondService(stores.respondStore, relay)
+
+      const respondResult = await respondService({
+        userId,
+        requestId: "perm-e2e-round-trip",
+        payload: {
+          type: "permission",
+          decision: "once",
+          client_action_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        },
+      })
+
+      // Respond service returns accepted
+      expect(respondResult.status).toBe("accepted")
+      expect(respondResult.relay).toBe("sent")
+
+      // Plugin received "once" reply
+      expect(pluginReceivedReplies).toHaveLength(1)
+      expect(pluginReceivedReplies[0].reply).toBe("once")
+
+      // Step 5: Wait for the permission.replied ingest to complete
+      await new Promise<void>((resolve) => setTimeout(resolve, 100))
+
+      // Verify: request is now resolved
+      const closedRequest = stores.requests.get("perm-e2e-round-trip")
+      expect(closedRequest?.status).toBe("resolved")
+
+      // Badge decrements to 0, requires_attention is false
+      const afterResolvedResult = await sessionsOpen({ userId })
+      expect(afterResolvedResult.groups).toHaveLength(1)
+      expect(afterResolvedResult.groups[0].sessions[0].requires_attention).toBe(false)
+      expect(afterResolvedResult.groups[0].sessions[0].attention_count).toBe(0)
+      expect(afterResolvedResult.groups[0].device.id).toBe(deviceId)
+    } finally {
+      pluginClient.disconnect()
+    }
+  })
+
+  it("permission.asked → Reject → permission.replied(reject) → request rejected, badge=0", async () => {
+    const stores = createOrderingStores()
+    const { ingest, sessionsOpen } = createFullOrderingServices(stores)
+
+    // Create session and blocker
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          sessionCreatedEvent("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", {
+            deviceUid,
+            sessionId: "session-reject-e2e",
+            title: "E2E Reject Test Session",
+          }),
+        ],
+      },
+    })
+
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          permissionAskedEvent("ffffffff-ffff-4fff-8fff-ffffffffffff", {
+            deviceUid,
+            requestId: "perm-reject-e2e",
+            sessionId: "session-reject-e2e",
+          }),
+        ],
+      },
+    })
+
+    expect(stores.requests.get("perm-reject-e2e")?.status).toBe("open")
+
+    const pluginClient = ioc(`http://127.0.0.1:${port}/plugin`, {
+      transports: ["websocket"],
+      auth: { token: validPat, device_uid: deviceUid },
+    })
+
+    pluginClient.on(
+      "action.permission.reply",
+      async (
+        envelope: PluginCommandEnvelope<{ reply: string }>,
+        ack: (r: PluginAckEnvelope) => void,
+      ) => {
+        ack({ command_id: envelope.command_id, accepted: true, error: null })
+
+        // Plugin ingests permission.replied with reject
+        await ingest({
+          userId,
+          payload: {
+            events: [
+              permissionRepliedEvent("11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+                deviceUid,
+                requestId: "perm-reject-e2e",
+                sessionId: "session-reject-e2e",
+                reply: "reject",
+              }),
+            ],
+          },
+        })
+      },
+    )
+
+    await new Promise<void>((resolve, reject) => {
+      pluginClient.on("connect", resolve)
+      pluginClient.on("connect_error", reject)
+    })
+    await new Promise<void>((resolve) => setTimeout(resolve, 100))
+
+    try {
+      const relay = createSocketRelay(io)
+      const respondService = createRequestRespondService(stores.respondStore, relay)
+
+      await respondService({
+        userId,
+        requestId: "perm-reject-e2e",
+        payload: {
+          type: "permission",
+          decision: "reject",
+          client_action_id: "22222222-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        },
+      })
+
+      await new Promise<void>((resolve) => setTimeout(resolve, 100))
+
+      // Request should be rejected (not resolved)
+      expect(stores.requests.get("perm-reject-e2e")?.status).toBe("rejected")
+
+      // Badge should be 0, no attention required
+      const afterReject = await sessionsOpen({ userId })
+      expect(afterReject.groups[0].sessions[0].requires_attention).toBe(false)
+      expect(afterReject.groups[0].sessions[0].attention_count).toBe(0)
+    } finally {
+      pluginClient.disconnect()
+    }
+  })
+
+  it("Allow for this run (always) follows same path — badge decrements", async () => {
+    const stores = createOrderingStores()
+    const { ingest, sessionsOpen } = createFullOrderingServices(stores)
+
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          sessionCreatedEvent("33333333-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+            deviceUid,
+            sessionId: "session-always-e2e",
+            title: "E2E Always Test Session",
+          }),
+        ],
+      },
+    })
+
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          permissionAskedEvent("44444444-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+            deviceUid,
+            requestId: "perm-always-e2e",
+            sessionId: "session-always-e2e",
+          }),
+        ],
+      },
+    })
+
+    const pluginClient = ioc(`http://127.0.0.1:${port}/plugin`, {
+      transports: ["websocket"],
+      auth: { token: validPat, device_uid: deviceUid },
+    })
+
+    pluginClient.on(
+      "action.permission.reply",
+      async (
+        envelope: PluginCommandEnvelope<{ reply: string }>,
+        ack: (r: PluginAckEnvelope) => void,
+      ) => {
+        ack({ command_id: envelope.command_id, accepted: true, error: null })
+
+        await ingest({
+          userId,
+          payload: {
+            events: [
+              permissionRepliedEvent("55555555-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+                deviceUid,
+                requestId: "perm-always-e2e",
+                sessionId: "session-always-e2e",
+                reply: "always",
+              }),
+            ],
+          },
+        })
+      },
+    )
+
+    await new Promise<void>((resolve, reject) => {
+      pluginClient.on("connect", resolve)
+      pluginClient.on("connect_error", reject)
+    })
+    await new Promise<void>((resolve) => setTimeout(resolve, 100))
+
+    try {
+      const relay = createSocketRelay(io)
+      const respondService = createRequestRespondService(stores.respondStore, relay)
+
+      const result = await respondService({
+        userId,
+        requestId: "perm-always-e2e",
+        payload: {
+          type: "permission",
+          decision: "always",
+          client_action_id: "66666666-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        },
+      })
+
+      expect(result.status).toBe("accepted")
+
+      await new Promise<void>((resolve) => setTimeout(resolve, 100))
+
+      // Request resolved (always → resolved)
+      expect(stores.requests.get("perm-always-e2e")?.status).toBe("resolved")
+
+      // Badge decremented
+      const afterAlways = await sessionsOpen({ userId })
+      expect(afterAlways.groups[0].sessions[0].requires_attention).toBe(false)
+      expect(afterAlways.groups[0].sessions[0].attention_count).toBe(0)
+    } finally {
+      pluginClient.disconnect()
+    }
+  })
+})
 
 describe("E2E: multi-device ordering", () => {
   it("blocker on lower-ranked device moves its device group to the top", async () => {
