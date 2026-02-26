@@ -6,6 +6,7 @@ import { loadEnv } from "./config/env"
 import { runtimePluginActivityService } from "./plugin-activity/runtime"
 import { runtimePluginEventsIngestService } from "./plugin-events/runtime"
 import { runtimePluginHeartbeatService } from "./plugin-heartbeat/runtime"
+import { runtimeRequestsOpenService } from "./requests/runtime"
 import { runtimeSessionsOpenService } from "./sessions/runtime"
 
 const env = loadEnv()
@@ -16,6 +17,7 @@ const app = createApp({
   pluginActivity: runtimePluginActivityService,
   pluginEventsIngest: runtimePluginEventsIngestService,
   sessionsOpen: runtimeSessionsOpenService,
+  requestsOpen: runtimeRequestsOpenService,
 })
 
 serve({

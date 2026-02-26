@@ -1,4 +1,8 @@
-import { ApiErrorSchema, SessionsOpenResponseSchema } from "@remocode/contracts"
+import {
+  ApiErrorSchema,
+  RequestsOpenResponseSchema,
+  SessionsOpenResponseSchema,
+} from "@remocode/contracts"
 import { describe, expect, it } from "vitest"
 import { z } from "zod"
 
@@ -8,6 +12,7 @@ import { ApiHttpError } from "./http/errors"
 import { createPluginActivityService } from "./plugin-activity/service"
 import type { PluginEventsIngestService } from "./plugin-events/ingest"
 import { createPluginHeartbeatService } from "./plugin-heartbeat/service"
+import { createRequestsOpenService } from "./requests/service"
 import { createSessionsOpenService } from "./sessions/service"
 
 const validJwt = "jwt-valid"
@@ -19,6 +24,7 @@ function createProtectedApp(
     pluginActivity?: ReturnType<typeof createPluginActivityService>
     pluginEventsIngest?: PluginEventsIngestService
     sessionsOpen?: ReturnType<typeof createSessionsOpenService>
+    requestsOpen?: ReturnType<typeof createRequestsOpenService>
   } = {},
 ) {
   return createApp({
@@ -52,6 +58,11 @@ function createProtectedApp(
       options.sessionsOpen ??
       createSessionsOpenService({
         getOpenSessions: async () => [],
+      }),
+    requestsOpen:
+      options.requestsOpen ??
+      createRequestsOpenService({
+        getOpenRequests: async () => [],
       }),
     pluginHeartbeat:
       options.pluginHeartbeat ??
@@ -424,6 +435,77 @@ describe("createApp", () => {
   it("rejects sessions/open without auth", async () => {
     const app = createProtectedApp()
     const response = await app.request("/v1/sessions/open")
+
+    expect(response.status).toBe(401)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "UNAUTHORIZED" },
+    })
+  })
+
+  it("returns requests/open with empty list when no open requests", async () => {
+    const app = createProtectedApp()
+
+    const response = await app.request("/v1/requests/open", {
+      headers: { authorization: `Bearer ${validJwt}` },
+    })
+    const body = await response.json()
+
+    expect(response.status).toBe(200)
+    expect(RequestsOpenResponseSchema.safeParse(body).success).toBe(true)
+    expect(body).toEqual({ requests: [] })
+  })
+
+  it("returns requests/open with populated requests", async () => {
+    const openedAt = new Date("2026-02-22T10:00:00.000Z")
+
+    const app = createProtectedApp({
+      requestsOpen: createRequestsOpenService({
+        getOpenRequests: async () => [
+          {
+            requestId: "perm-req-1",
+            sessionId: "session-abc",
+            deviceId: "device-1",
+            kind: "permission",
+            status: "open",
+            openedAt,
+            payload: {
+              id: "perm-req-1",
+              sessionID: "session-abc",
+              permission: "bash",
+              patterns: ["npm install"],
+            },
+          },
+          {
+            requestId: "q-req-1",
+            sessionId: "session-abc",
+            deviceId: "device-1",
+            kind: "question",
+            status: "open",
+            openedAt: new Date("2026-02-22T10:01:00.000Z"),
+            payload: { id: "q-req-1", sessionID: "session-abc", questions: [] },
+          },
+        ],
+      }),
+    })
+
+    const response = await app.request("/v1/requests/open", {
+      headers: { authorization: `Bearer ${validJwt}` },
+    })
+    const body = await response.json()
+
+    expect(response.status).toBe(200)
+    expect(RequestsOpenResponseSchema.safeParse(body).success).toBe(true)
+    expect(body.requests).toHaveLength(2)
+    expect(body.requests[0].request_id).toBe("perm-req-1")
+    expect(body.requests[0].kind).toBe("permission")
+    expect(body.requests[0].session_id).toBe("session-abc")
+    expect(body.requests[1].request_id).toBe("q-req-1")
+    expect(body.requests[1].kind).toBe("question")
+  })
+
+  it("rejects requests/open without auth", async () => {
+    const app = createProtectedApp()
+    const response = await app.request("/v1/requests/open")
 
     expect(response.status).toBe(401)
     await expect(response.json()).resolves.toMatchObject({

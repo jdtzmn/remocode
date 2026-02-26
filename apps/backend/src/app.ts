@@ -6,6 +6,7 @@ import { ApiHttpError, toApiErrorResponse, toApiHttpError } from "./http/errors"
 import type { PluginActivityService } from "./plugin-activity/service"
 import type { PluginEventsIngestService } from "./plugin-events/ingest"
 import type { PluginHeartbeatService } from "./plugin-heartbeat/service"
+import type { RequestsOpenService } from "./requests/service"
 import type { SessionsOpenService } from "./sessions/service"
 
 type CreateAppOptions = {
@@ -15,6 +16,7 @@ type CreateAppOptions = {
   pluginActivity?: PluginActivityService
   pluginEventsIngest?: PluginEventsIngestService
   sessionsOpen?: SessionsOpenService
+  requestsOpen?: RequestsOpenService
 }
 
 function rejectWithUnauthorized(message: string): MiddlewareHandler<AuthBindings> {
@@ -58,6 +60,14 @@ export function createApp(options: CreateAppOptions = {}) {
       })
     })
 
+  const requestsOpen =
+    options.requestsOpen ??
+    (async () => {
+      throw new ApiHttpError("INTERNAL_ERROR", {
+        message: "Requests open service is not configured",
+      })
+    })
+
   app.onError((error, context) => {
     const apiError = toApiHttpError(error)
 
@@ -83,6 +93,17 @@ export function createApp(options: CreateAppOptions = {}) {
   app.get("/v1/sessions/open", async (context) => {
     const auth = context.get("appAuth")
     const response = await sessionsOpen({ userId: auth.userId })
+    return context.json(response)
+  })
+
+  app.use(
+    "/v1/requests/*",
+    options.appAuthMiddleware ?? rejectWithUnauthorized("App authentication is not configured"),
+  )
+
+  app.get("/v1/requests/open", async (context) => {
+    const auth = context.get("appAuth")
+    const response = await requestsOpen({ userId: auth.userId })
     return context.json(response)
   })
 
