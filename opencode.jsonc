@@ -1,0 +1,28 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "agent": {
+    "explore": {
+      "disable": true
+    },
+    "general": {
+      "disable": true
+    }
+  },
+  "mcp": {
+    "XcodeBuildMCP": {
+      "type": "local",
+      "command": ["bunx", "xcodebuildmcp@latest", "mcp"],
+      "enabled": true
+    },
+    "ios-simulator": {
+      "type": "local",
+      "command": ["bunx", "ios-simulator-mcp@latest"],
+      "enabled": true
+    },
+    "swiftlens": {
+      "type": "local",
+      "command": ["uvx", "swiftlens"],
+      "enabled": true
+    }
+  }
+}
