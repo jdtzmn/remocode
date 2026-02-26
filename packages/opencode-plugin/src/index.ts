@@ -3,6 +3,7 @@ import type { Plugin } from "@opencode-ai/plugin"
 import { startActivitySampler } from "./activity-sampler"
 import { type OpenCodeClient, registerCommandHandlers } from "./command-handler"
 import { resolveDeviceUid } from "./device-uid"
+import { createEventBatchSender, createEventForwarder } from "./event-mapper"
 import { SessionTracker, startHeartbeat } from "./heartbeat"
 import { connectSocket, emitPluginConnected } from "./plugin-startup"
 import { createPluginSocket } from "./socket-client"
@@ -128,6 +129,17 @@ export const RemocodePlugin: Plugin = async ({ client, serverUrl }) => {
     deviceUid,
   })
 
+  // Create event batch sender (flush every 250ms or 50 events; immediate for blockers)
+  const eventSender = createEventBatchSender({ backendUrl, pat })
+
+  // Create event forwarder that maps OpenCode events to canonical envelopes
+  const forwardEvent = createEventForwarder({
+    backendUrl,
+    pat,
+    deviceUid,
+    sender: eventSender,
+  })
+
   return {
     event: async ({ event }) => {
       // Track session lifecycle events so heartbeat can include active session IDs
@@ -136,6 +148,9 @@ export const RemocodePlugin: Plugin = async ({ client, serverUrl }) => {
       } else if (event.type === "session.deleted") {
         sessionTracker.removeSession(event.properties.info.id)
       }
+
+      // Forward tracked events to the backend
+      await forwardEvent({ event })
     },
   }
 }
