@@ -310,6 +310,31 @@ function questionRejectedEvent(
   }
 }
 
+function questionRepliedEvent(
+  eventId: string,
+  opts: {
+    deviceUid?: string
+    requestId?: string
+    sessionId?: string
+    answers?: string[][]
+  } = {},
+) {
+  return {
+    event_id: eventId,
+    adapter: "opencode",
+    adapter_version: "1.0.0",
+    device_uid: opts.deviceUid ?? "dev-uid-1",
+    event_type: "question.replied",
+    session_id: opts.sessionId ?? "session-abc",
+    occurred_at: "2026-02-22T10:32:00.000Z",
+    payload: {
+      sessionID: opts.sessionId ?? "session-abc",
+      requestID: opts.requestId ?? "question-01",
+      answers: opts.answers ?? [["Unit"]],
+    },
+  }
+}
+
 function sessionCreatedEvent(
   eventId: string,
   opts: { deviceUid?: string; sessionId?: string; title?: string } = {},
@@ -1876,6 +1901,402 @@ describe("E2E: permission unblock round-trip", () => {
       const afterAlways = await sessionsOpen({ userId })
       expect(afterAlways.groups[0].sessions[0].requires_attention).toBe(false)
       expect(afterAlways.groups[0].sessions[0].attention_count).toBe(0)
+    } finally {
+      pluginClient.disconnect()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 7. E2E: Question unblock round-trip
+// ---------------------------------------------------------------------------
+//
+// Scenario:
+//   1. plugin.connected + session.created arrive via ingest
+//   2. question.asked arrives — request is open, session requires_attention=true, badge=1
+//   3. App submits answers via respond service — command relayed to live plugin socket
+//   4. Plugin acks the command and then ingests question.replied (simulating OpenCode callback)
+//   5. Request is closed as resolved, session requires_attention=false, attention_count=0
+//
+//   Variant: App rejects the question — plugin ingests question.rejected → status=rejected, badge=0
+
+describe("E2E: question unblock round-trip", () => {
+  let io: Server
+  let port: number
+  let closeServer: () => Promise<void>
+  const validPat = "pat_e2equest_testSecret"
+  const userId = "user-quest-e2e"
+  const deviceUid = "dev-quest-uid"
+
+  beforeEach(async () => {
+    io = new Server({ transports: ["websocket"] })
+    configurePluginNamespace(io, {
+      authenticate: async (token) => {
+        if (token !== validPat) throw new ApiHttpError("UNAUTHORIZED")
+        return { userId, patId: "pat-quest-e2e", tokenPrefix: "e2equest" }
+      },
+      getOrCreateDeviceId: async () => `device:${userId}:${deviceUid}`,
+    })
+    const server = await startTestServer(io)
+    port = server.port
+    closeServer = server.close
+  })
+
+  afterEach(async () => {
+    await closeServer()
+  })
+
+  it("question.asked → submit answers → question.replied → badge decrements to 0", async () => {
+    const stores = createOrderingStores()
+    const { ingest, sessionsOpen } = createFullOrderingServices(stores)
+    const deviceId = `device:${userId}:${deviceUid}`
+
+    // Step 1: session.created
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          sessionCreatedEvent("aa000001-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+            deviceUid,
+            sessionId: "session-quest-e2e",
+            title: "E2E Question Test Session",
+          }),
+        ],
+      },
+    })
+
+    // Step 2: question.asked — blocker opens
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          questionAskedEvent("aa000002-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+            deviceUid,
+            requestId: "quest-e2e-round-trip",
+            sessionId: "session-quest-e2e",
+          }),
+        ],
+      },
+    })
+
+    // Verify: request is open, badge is 1, requires_attention is true
+    const openRequest = stores.requests.get("quest-e2e-round-trip")
+    expect(openRequest?.status).toBe("open")
+    expect(openRequest?.kind).toBe("question")
+
+    const afterAskedResult = await sessionsOpen({ userId })
+    expect(afterAskedResult.groups).toHaveLength(1)
+    expect(afterAskedResult.groups[0].sessions[0].requires_attention).toBe(true)
+    expect(afterAskedResult.groups[0].sessions[0].attention_count).toBe(1)
+
+    // Step 3: Connect plugin client and handle the command
+    const pluginClient = ioc(`http://127.0.0.1:${port}/plugin`, {
+      transports: ["websocket"],
+      auth: { token: validPat, device_uid: deviceUid },
+    })
+
+    // Track what the plugin receives + simulate ingesting question.replied
+    const pluginReceivedAnswers: string[][][] = []
+
+    pluginClient.on(
+      "action.question.reply",
+      async (
+        envelope: PluginCommandEnvelope<{ answers: string[][] }>,
+        ack: (r: PluginAckEnvelope) => void,
+      ) => {
+        pluginReceivedAnswers.push(envelope.payload.answers)
+        // Ack the command
+        ack({ command_id: envelope.command_id, accepted: true, error: null })
+
+        // Step 4: Plugin simulates OpenCode callback — ingests question.replied
+        await ingest({
+          userId,
+          payload: {
+            events: [
+              questionRepliedEvent("aa000003-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+                deviceUid,
+                requestId: "quest-e2e-round-trip",
+                sessionId: "session-quest-e2e",
+                answers: envelope.payload.answers,
+              }),
+            ],
+          },
+        })
+      },
+    )
+
+    await new Promise<void>((resolve, reject) => {
+      pluginClient.on("connect", resolve)
+      pluginClient.on("connect_error", reject)
+    })
+    // Wait for room join to propagate
+    await new Promise<void>((resolve) => setTimeout(resolve, 100))
+
+    try {
+      // Step 3 (cont): App submits answers
+      const relay = createSocketRelay(io)
+      const respondService = createRequestRespondService(stores.respondStore, relay)
+
+      const respondResult = await respondService({
+        userId,
+        requestId: "quest-e2e-round-trip",
+        payload: {
+          type: "question",
+          answers: [["All"]],
+          client_action_id: "aa000004-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        },
+      })
+
+      // Respond service returns accepted
+      expect(respondResult.status).toBe("accepted")
+      expect(respondResult.relay).toBe("sent")
+
+      // Plugin received the answers
+      expect(pluginReceivedAnswers).toHaveLength(1)
+      expect(pluginReceivedAnswers[0]).toEqual([["All"]])
+
+      // Step 5: Wait for the question.replied ingest to complete
+      await new Promise<void>((resolve) => setTimeout(resolve, 100))
+
+      // Verify: request is now resolved
+      const closedRequest = stores.requests.get("quest-e2e-round-trip")
+      expect(closedRequest?.status).toBe("resolved")
+
+      // Badge decrements to 0, requires_attention is false
+      const afterResolvedResult = await sessionsOpen({ userId })
+      expect(afterResolvedResult.groups).toHaveLength(1)
+      expect(afterResolvedResult.groups[0].sessions[0].requires_attention).toBe(false)
+      expect(afterResolvedResult.groups[0].sessions[0].attention_count).toBe(0)
+      expect(afterResolvedResult.groups[0].device.id).toBe(deviceId)
+    } finally {
+      pluginClient.disconnect()
+    }
+  })
+
+  it("question.asked → reject → question.rejected → request rejected, badge=0", async () => {
+    const stores = createOrderingStores()
+    const { ingest, sessionsOpen } = createFullOrderingServices(stores)
+
+    // Create session and blocker
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          sessionCreatedEvent("bb000001-bbbb-4bbb-8bbb-bbbbbbbbbbbb", {
+            deviceUid,
+            sessionId: "session-quest-reject-e2e",
+            title: "E2E Question Reject Session",
+          }),
+        ],
+      },
+    })
+
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          questionAskedEvent("bb000002-bbbb-4bbb-8bbb-bbbbbbbbbbbb", {
+            deviceUid,
+            requestId: "quest-reject-e2e",
+            sessionId: "session-quest-reject-e2e",
+          }),
+        ],
+      },
+    })
+
+    expect(stores.requests.get("quest-reject-e2e")?.status).toBe("open")
+
+    const pluginClient = ioc(`http://127.0.0.1:${port}/plugin`, {
+      transports: ["websocket"],
+      auth: { token: validPat, device_uid: deviceUid },
+    })
+
+    pluginClient.on(
+      "action.question.reject",
+      async (envelope: PluginCommandEnvelope, ack: (r: PluginAckEnvelope) => void) => {
+        ack({ command_id: envelope.command_id, accepted: true, error: null })
+
+        // Plugin ingests question.rejected
+        await ingest({
+          userId,
+          payload: {
+            events: [
+              questionRejectedEvent("bb000003-bbbb-4bbb-8bbb-bbbbbbbbbbbb", {
+                deviceUid,
+                requestId: "quest-reject-e2e",
+                sessionId: "session-quest-reject-e2e",
+              }),
+            ],
+          },
+        })
+      },
+    )
+
+    await new Promise<void>((resolve, reject) => {
+      pluginClient.on("connect", resolve)
+      pluginClient.on("connect_error", reject)
+    })
+    await new Promise<void>((resolve) => setTimeout(resolve, 100))
+
+    try {
+      const relay = createSocketRelay(io)
+      const respondService = createRequestRespondService(stores.respondStore, relay)
+
+      await respondService({
+        userId,
+        requestId: "quest-reject-e2e",
+        payload: {
+          type: "question",
+          decision: "reject",
+          client_action_id: "bb000004-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        },
+      })
+
+      await new Promise<void>((resolve) => setTimeout(resolve, 100))
+
+      // Request should be rejected (not resolved)
+      expect(stores.requests.get("quest-reject-e2e")?.status).toBe("rejected")
+
+      // Badge should be 0, no attention required
+      const afterReject = await sessionsOpen({ userId })
+      expect(afterReject.groups[0].sessions[0].requires_attention).toBe(false)
+      expect(afterReject.groups[0].sessions[0].attention_count).toBe(0)
+    } finally {
+      pluginClient.disconnect()
+    }
+  })
+
+  it("question.asked with multiple questions — answers relayed correctly, badge decrements", async () => {
+    const stores = createOrderingStores()
+    const { ingest, sessionsOpen } = createFullOrderingServices(stores)
+
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          sessionCreatedEvent("cc000001-cccc-4ccc-8ccc-cccccccccccc", {
+            deviceUid,
+            sessionId: "session-quest-multi-e2e",
+            title: "Multi-Question Session",
+          }),
+        ],
+      },
+    })
+
+    // question.asked with multiple questions
+    await ingest({
+      userId,
+      payload: {
+        events: [
+          {
+            event_id: "cc000002-cccc-4ccc-8ccc-cccccccccccc",
+            adapter: "opencode",
+            adapter_version: "1.0.0",
+            device_uid: deviceUid,
+            event_type: "question.asked",
+            session_id: "session-quest-multi-e2e",
+            occurred_at: "2026-02-22T10:30:00.000Z",
+            payload: {
+              id: "quest-multi-e2e",
+              sessionID: "session-quest-multi-e2e",
+              questions: [
+                {
+                  header: "Test Scope",
+                  question: "Which tests?",
+                  options: [
+                    { label: "Unit", description: "Run unit tests only" },
+                    { label: "All", description: "Run all test suites" },
+                  ],
+                  multiple: false,
+                  custom: false,
+                },
+                {
+                  header: "Coverage",
+                  question: "Generate coverage report?",
+                  options: [
+                    { label: "Yes", description: "Generate coverage" },
+                    { label: "No", description: "Skip coverage" },
+                  ],
+                  multiple: false,
+                  custom: false,
+                },
+              ],
+            },
+          },
+        ],
+      },
+    })
+
+    expect(stores.requests.get("quest-multi-e2e")?.kind).toBe("question")
+
+    const pluginClient = ioc(`http://127.0.0.1:${port}/plugin`, {
+      transports: ["websocket"],
+      auth: { token: validPat, device_uid: deviceUid },
+    })
+
+    const pluginReceivedAnswers: string[][][] = []
+
+    pluginClient.on(
+      "action.question.reply",
+      async (
+        envelope: PluginCommandEnvelope<{ answers: string[][] }>,
+        ack: (r: PluginAckEnvelope) => void,
+      ) => {
+        pluginReceivedAnswers.push(envelope.payload.answers)
+        ack({ command_id: envelope.command_id, accepted: true, error: null })
+
+        // Plugin ingests question.replied with answers for both questions
+        await ingest({
+          userId,
+          payload: {
+            events: [
+              questionRepliedEvent("cc000003-cccc-4ccc-8ccc-cccccccccccc", {
+                deviceUid,
+                requestId: "quest-multi-e2e",
+                sessionId: "session-quest-multi-e2e",
+                answers: envelope.payload.answers,
+              }),
+            ],
+          },
+        })
+      },
+    )
+
+    await new Promise<void>((resolve, reject) => {
+      pluginClient.on("connect", resolve)
+      pluginClient.on("connect_error", reject)
+    })
+    await new Promise<void>((resolve) => setTimeout(resolve, 100))
+
+    try {
+      const relay = createSocketRelay(io)
+      const respondService = createRequestRespondService(stores.respondStore, relay)
+
+      const result = await respondService({
+        userId,
+        requestId: "quest-multi-e2e",
+        payload: {
+          type: "question",
+          answers: [["All"], ["Yes"]],
+          client_action_id: "cc000004-cccc-4ccc-8ccc-cccccccccccc",
+        },
+      })
+
+      expect(result.status).toBe("accepted")
+
+      // Plugin received both answers
+      expect(pluginReceivedAnswers).toHaveLength(1)
+      expect(pluginReceivedAnswers[0]).toEqual([["All"], ["Yes"]])
+
+      await new Promise<void>((resolve) => setTimeout(resolve, 100))
+
+      // Request resolved
+      expect(stores.requests.get("quest-multi-e2e")?.status).toBe("resolved")
+
+      // Badge decremented
+      const afterResolved = await sessionsOpen({ userId })
+      expect(afterResolved.groups[0].sessions[0].requires_attention).toBe(false)
+      expect(afterResolved.groups[0].sessions[0].attention_count).toBe(0)
     } finally {
       pluginClient.disconnect()
     }
