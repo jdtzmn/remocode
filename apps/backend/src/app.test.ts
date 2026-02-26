@@ -71,6 +71,7 @@ function createProtectedApp(
       options.pluginHeartbeat ??
       createPluginHeartbeatService({
         recordHeartbeat: async () => undefined,
+        updateSessionsHeartbeat: async () => undefined,
       }),
     pluginActivity:
       options.pluginActivity ??

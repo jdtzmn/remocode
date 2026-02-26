@@ -5,6 +5,11 @@ type PluginHeartbeatRequest = z.infer<typeof PluginHeartbeatRequestSchema>
 
 type DeviceHeartbeatStore = {
   recordHeartbeat: (args: { userId: string; heartbeat: PluginHeartbeatRequest }) => Promise<void>
+  updateSessionsHeartbeat: (args: {
+    sessionIds: string[]
+    userId: string
+    lastHeartbeatAt: Date
+  }) => Promise<void>
 }
 
 export type PluginHeartbeatService = (args: {
@@ -16,10 +21,20 @@ export function createPluginHeartbeatService(store: DeviceHeartbeatStore): Plugi
   return async ({ userId, payload }) => {
     const heartbeat = PluginHeartbeatRequestSchema.parse(payload)
 
+    const receivedAt = new Date()
+
     await store.recordHeartbeat({
       userId,
       heartbeat,
     })
+
+    if (heartbeat.active_session_ids.length > 0) {
+      await store.updateSessionsHeartbeat({
+        sessionIds: heartbeat.active_session_ids,
+        userId,
+        lastHeartbeatAt: receivedAt,
+      })
+    }
 
     return { ok: true }
   }
