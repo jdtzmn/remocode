@@ -148,3 +148,28 @@ export async function respondToRequest(
     body: JSON.stringify(body),
   })
 }
+
+// ─── Push token ─────────────────────────────────────────────────────────────
+
+export interface RegisterPushTokenRequest {
+  expo_push_token: string
+  platform: "ios" | "android"
+  device_name?: string
+  app_version?: string
+}
+
+export interface RegisterPushTokenResponse {
+  id: string
+  expo_push_token: string
+  platform: string
+  created_at: string
+}
+
+export async function registerPushToken(
+  body: RegisterPushTokenRequest,
+): Promise<RegisterPushTokenResponse> {
+  return apiFetch<RegisterPushTokenResponse>("/v1/push-tokens", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
