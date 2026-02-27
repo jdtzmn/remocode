@@ -146,6 +146,9 @@ xcuserdata/
 .Trash-*
 .nfs*
 
+### OpenCode local plugin env (contains secrets) ###
+.opencode/plugins/env.ts
+
 ### Monorepo extras ###
 # local env files that should never be committed
 .env.*
