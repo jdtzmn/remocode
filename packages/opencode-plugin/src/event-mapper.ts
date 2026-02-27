@@ -76,13 +76,32 @@ export function mapOpenCodeEvent(
   switch (event.type) {
     case "session.created":
     case "session.updated":
-    case "session.deleted":
+    case "session.deleted": {
+      const i = event.properties.info
+      // Pick only the fields defined in SessionInfoSchema to avoid strict() rejections
+      // on the backend when the OpenCode SDK adds extra fields to the Session object.
+      const info: Record<string, unknown> = {
+        id: i.id,
+        projectID: i.projectID,
+        title: i.title,
+        directory: i.directory,
+        version: i.version,
+        time: i.time,
+      }
+      // Cast to access optional fields that may exist on newer SDK versions
+      const iAny = i as Record<string, unknown>
+      if (iAny.slug !== undefined) info.slug = iAny.slug
+      if (iAny.parentID !== undefined) info.parentID = iAny.parentID
+      if (iAny.summary !== undefined) info.summary = iAny.summary
+      if (iAny.share !== undefined) info.share = iAny.share
+      if (iAny.revert !== undefined) info.revert = iAny.revert
       return {
         ...base,
         event_type: event.type,
-        session_id: event.properties.info.id,
-        payload: { info: event.properties.info },
+        session_id: i.id,
+        payload: { info },
       }
+    }
 
     case "session.status":
       return {
