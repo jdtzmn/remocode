@@ -77,28 +77,75 @@ export function mapOpenCodeEvent(
     case "session.created":
     case "session.updated":
     case "session.deleted": {
-      const i = event.properties.info
-      // Pick only the fields defined in SessionInfoSchema to avoid strict() rejections
-      // on the backend when the OpenCode SDK adds extra fields to the Session object.
+      const i = event.properties.info as Record<string, unknown>
+      // Sanitize session info against SessionInfoSchema's strict() shapes.
+      // Every nested object is also defined with .strict(), so we must pick
+      // only known fields at every level to avoid INVALID_PAYLOAD rejections.
+
+      // time — required, strict: { created, updated, compacting?, archived? }
+      const rawTime = (i.time ?? {}) as Record<string, unknown>
+      const time: Record<string, unknown> = {
+        created: rawTime.created,
+        updated: rawTime.updated,
+      }
+      if (rawTime.compacting !== undefined) time.compacting = rawTime.compacting
+      if (rawTime.archived !== undefined) time.archived = rawTime.archived
+
       const info: Record<string, unknown> = {
         id: i.id,
         projectID: i.projectID,
         title: i.title,
         directory: i.directory,
         version: i.version,
-        time: i.time,
+        time,
       }
-      // Cast to access optional fields that may exist on newer SDK versions
-      const iAny = i as Record<string, unknown>
-      if (iAny.slug !== undefined) info.slug = iAny.slug
-      if (iAny.parentID !== undefined) info.parentID = iAny.parentID
-      if (iAny.summary !== undefined) info.summary = iAny.summary
-      if (iAny.share !== undefined) info.share = iAny.share
-      if (iAny.revert !== undefined) info.revert = iAny.revert
+
+      // Optional top-level fields — include only if present
+      if (i.slug !== undefined) info.slug = i.slug
+      if (i.parentID !== undefined) info.parentID = i.parentID
+
+      // summary — strict: { additions, deletions, files, diffs? }
+      if (i.summary !== undefined) {
+        const s = i.summary as Record<string, unknown>
+        const summary: Record<string, unknown> = {
+          additions: s.additions,
+          deletions: s.deletions,
+          files: s.files,
+        }
+        if (s.diffs !== undefined) summary.diffs = s.diffs
+        info.summary = summary
+      }
+
+      // share — strict: { url }
+      if (i.share !== undefined) {
+        const sh = i.share as Record<string, unknown>
+        info.share = { url: sh.url }
+      }
+
+      // permission — array of strict: { permission, pattern, action }
+      if (i.permission !== undefined) {
+        const perms = i.permission as Array<Record<string, unknown>>
+        info.permission = perms.map((p) => ({
+          permission: p.permission,
+          pattern: p.pattern,
+          action: p.action,
+        }))
+      }
+
+      // revert — strict: { messageID, partID?, snapshot?, diff? }
+      if (i.revert !== undefined) {
+        const r = i.revert as Record<string, unknown>
+        const revert: Record<string, unknown> = { messageID: r.messageID }
+        if (r.partID !== undefined) revert.partID = r.partID
+        if (r.snapshot !== undefined) revert.snapshot = r.snapshot
+        if (r.diff !== undefined) revert.diff = r.diff
+        info.revert = revert
+      }
+
       return {
         ...base,
         event_type: event.type,
-        session_id: i.id,
+        session_id: i.id as string,
         payload: { info },
       }
     }
