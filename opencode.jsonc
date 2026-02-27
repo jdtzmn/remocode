@@ -23,6 +23,6 @@
       "type": "local",
       "command": ["uvx", "swiftlens"],
       "enabled": true
-    }
+    },
   }
 }
