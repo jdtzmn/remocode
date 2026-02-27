@@ -1,11 +1,8 @@
-import { randomUUID } from "node:crypto"
-
 import {
   type ActivityProvider,
   MacOSActivityProvider,
   computeConfidence,
 } from "./activity-provider"
-import { PLUGIN_VERSION } from "./plugin-startup"
 
 export type ActivitySamplerOptions = {
   backendUrl: string
@@ -65,23 +62,13 @@ export async function sendActivitySample(options: {
     sampled_at: sampledAt,
   }
 
-  const event = {
-    event_id: randomUUID(),
-    adapter: "opencode",
-    adapter_version: PLUGIN_VERSION,
-    device_uid: deviceUid,
-    event_type: "device.activity",
-    occurred_at: sampledAt,
-    payload,
-  }
-
   const response = await fetch(`${backendUrl}/v1/plugin/activity`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${pat}`,
     },
-    body: JSON.stringify(event),
+    body: JSON.stringify({ device_uid: deviceUid, sample: payload }),
   })
 
   if (!response.ok) {
