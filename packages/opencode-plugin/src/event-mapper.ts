@@ -122,15 +122,10 @@ export function mapOpenCodeEvent(
         info.share = { url: sh.url }
       }
 
-      // permission — array of strict: { permission, pattern, action }
-      if (i.permission !== undefined) {
-        const perms = i.permission as Array<Record<string, unknown>>
-        info.permission = perms.map((p) => ({
-          permission: p.permission,
-          pattern: p.pattern,
-          action: p.action,
-        }))
-      }
+      // NOTE: permission is intentionally NOT forwarded. The SDK sends it as a
+      // dict ({ edit: "ask", bash: "allow", ... }) which is fundamentally
+      // incompatible with the contract's array shape ([{ permission, pattern, action }]).
+      // It's optional in SessionInfoSchema and unused by session projections.
 
       // revert — strict: { messageID, partID?, snapshot?, diff? }
       if (i.revert !== undefined) {
@@ -150,16 +145,26 @@ export function mapOpenCodeEvent(
       }
     }
 
-    case "session.status":
+    case "session.status": {
+      // Sanitize status against SessionStatusSchema's strict() discriminated union.
+      // Each variant (idle, busy, retry) is strict — extra fields cause rejection.
+      const rawStatus = event.properties.status as Record<string, unknown>
+      const sanitizedStatus: Record<string, unknown> = { type: rawStatus.type }
+      if (rawStatus.type === "retry") {
+        sanitizedStatus.attempt = rawStatus.attempt
+        sanitizedStatus.message = rawStatus.message
+        sanitizedStatus.next = rawStatus.next
+      }
       return {
         ...base,
         event_type: "session.status",
         session_id: event.properties.sessionID,
         payload: {
           sessionID: event.properties.sessionID,
-          status: event.properties.status,
+          status: sanitizedStatus,
         },
       }
+    }
 
     case "permission.updated": {
       // SDK v1: "permission.updated" fires when a permission is requested.

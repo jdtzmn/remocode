@@ -140,6 +140,20 @@ export const RemocodePlugin: Plugin = async ({ client, serverUrl }) => {
     sender: eventSender,
   })
 
+  // Seed the session tracker with any sessions that already exist.
+  // The plugin loads after OpenCode starts, so session.created has likely
+  // already fired before our event hook is registered.
+  try {
+    const { data: sessions } = await client.session.list()
+    if (sessions) {
+      for (const s of sessions) {
+        sessionTracker.addSession(s.id)
+      }
+    }
+  } catch {
+    // Non-fatal — tracker will be populated by future events
+  }
+
   return {
     event: async ({ event }) => {
       // Track session lifecycle events so heartbeat can include active session IDs
@@ -147,6 +161,11 @@ export const RemocodePlugin: Plugin = async ({ client, serverUrl }) => {
         sessionTracker.addSession(event.properties.info.id)
       } else if (event.type === "session.deleted") {
         sessionTracker.removeSession(event.properties.info.id)
+      } else if (event.type === "session.status") {
+        // session.status fires frequently (busy/idle) and carries a sessionID.
+        // Use it to ensure sessions that were created before the plugin loaded
+        // still get tracked.
+        sessionTracker.addSession(event.properties.sessionID)
       }
 
       // Forward tracked events to the backend
